@@ -1,7 +1,7 @@
 /*
  * ser2net MCU - Embedded RFC2217 runtime
  *
- * Copyright (C) 2024  Your Name / Your Organisation
+ * Copyright (C) 2025  Andreas Merk
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

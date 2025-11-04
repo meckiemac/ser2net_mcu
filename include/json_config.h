@@ -1,7 +1,7 @@
 /*
  * ser2net MCU - Embedded RFC2217 runtime
  *
- * Copyright (C) 2024  Your Name / Your Organisation
+ * Copyright (C) 2025 Andreas Merk
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,6 +30,7 @@
 #define SER2NET_FREERTOS_JSON_CONFIG_H
 
 #include "config.h"
+#include "ser2net_opts.h"
 
 /** @brief Parse an embedded JSON configuration string (ESP32 specific). */
 BaseType_t ser2net_load_config_json_esp32(const char *json,

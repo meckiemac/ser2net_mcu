@@ -1,7 +1,7 @@
 /*
  * ser2net MCU - Embedded RFC2217 runtime
  *
- * Copyright (C) 2024  Your Name / Your Organisation
+ * Copyright (C) 2025  Andreas Merk
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,6 +26,10 @@
  * Useful for remote health checks without attaching a serial monitor.
  */
 
+#include "ser2net_opts.h"
+
+#if ENABLE_CONTROL_PORT
+
 #include "control_port.h"
 #include "session_ops.h"
 #include "adapters.h"
@@ -36,7 +40,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include <limits.h>
 #include <limits.h>
 
 #include "freertos/FreeRTOS.h"
@@ -60,6 +63,7 @@ static TaskHandle_t control_task_handle = NULL;
 static int control_listen_fd = -1;
 static bool control_running = false;
 
+#if ENABLE_MONITORING
 #define MONITOR_QUEUE_DEPTH 16
 #define MONITOR_CHUNK       64
 
@@ -82,6 +86,7 @@ static struct {
     enum monitor_type type;
     uint16_t tcp_port;
 } monitor_state = { MONITOR_NONE, 0 };
+#endif
 
 static bool
 parse_pin_token(const char *token,
@@ -172,6 +177,8 @@ parse_pin_token(const char *token,
     return true;
 }
 
+#endif /* ENABLE_CONTROL_PORT */
+
 static const char *
 format_pin_token(const char *prefix, int value, char *buf, size_t len)
 {
@@ -203,6 +210,7 @@ static void send_prompt(int fd)
     send_str(fd, "ser2net> ");
 }
 
+#if ENABLE_MONITORING
 static void flush_monitor_queue(int fd)
 {
     if (!monitor_queue)
@@ -220,6 +228,12 @@ static void flush_monitor_queue(int fd)
         send(fd, msg.data, msg.len, 0);
     }
 }
+#else
+static void flush_monitor_queue(int fd)
+{
+    (void) fd;
+}
+#endif
 
 static const struct ser2net_esp32_serial_port_cfg *find_port_cfg(const char *spec);
 static void handle_showport(int fd, const char *spec, bool short_format);
@@ -252,8 +266,10 @@ static bool handle_command_line(int fd, char *line)
         send_line(fd, "  version            - display firmware version");
         send_line(fd, "  showport [port]    - detailed info for ports (tcp/uart)");
         send_line(fd, "  showshortport [p]  - single-line summary for ports");
+#if ENABLE_MONITORING
         send_line(fd, "  monitor <type> <p> - stream data (tcp or term)");
         send_line(fd, "  monitor stop       - clear monitor request");
+#endif
         send_line(fd, "  disconnect <port>  - terminate active session");
         send_line(fd, "  setporttimeout <port> <seconds>");
         send_line(fd, "  setportconfig <port> <baud/flags> [UARTn] [TXm|-TX] [RXk|-RX] [RTSs|-RTS] [CTSq|-CTS]");
@@ -268,7 +284,9 @@ static bool handle_command_line(int fd, char *line)
     } else if (strcasecmp(cmd, "showshortport") == 0) {
         char *spec = strtok_r(NULL, " \t", &saveptr);
         handle_showport(fd, spec, true);
-    } else if (strcasecmp(cmd, "monitor") == 0) {
+    }
+#if ENABLE_MONITORING
+    else if (strcasecmp(cmd, "monitor") == 0) {
         char *type = strtok_r(NULL, " \t", &saveptr);
         if (!type) {
             send_line(fd, "Usage: monitor <tcp|term> <tcp port>");
@@ -298,7 +316,13 @@ static bool handle_command_line(int fd, char *line)
                 }
             }
         }
-    } else if (strcasecmp(cmd, "disconnect") == 0) {
+    }
+#else
+    else if (strcasecmp(cmd, "monitor") == 0) {
+        send_line(fd, "Monitoring disabled in this build.");
+    }
+#endif
+    else if (strcasecmp(cmd, "disconnect") == 0) {
         char *spec = strtok_r(NULL, " \t", &saveptr);
         if (!spec) {
             send_line(fd, "Usage: disconnect <tcp port>");
@@ -319,6 +343,10 @@ static bool handle_command_line(int fd, char *line)
         char *timeout_tok = strtok_r(NULL, " \t", &saveptr);
         handle_setporttimeout(fd, spec, timeout_tok);
     } else if (strcasecmp(cmd, "setportconfig") == 0) {
+#if !ENABLE_DYNAMIC_SESSIONS
+        (void) strtok_r(NULL, "", &saveptr);
+        send_line(fd, "Dynamic configuration disabled in this build.");
+#else
         char *spec = strtok_r(NULL, " \t", &saveptr);
         char *config_tokens = strtok_r(NULL, "", &saveptr);
         if (!spec || !config_tokens) {
@@ -428,6 +456,7 @@ static bool handle_command_line(int fd, char *line)
                 }
             }
         }
+#endif
     } else if (strcasecmp(cmd, "setportcontrol") == 0) {
         char *spec = strtok_r(NULL, " \t", &saveptr);
         char *controls = strtok_r(NULL, "", &saveptr);
@@ -745,6 +774,12 @@ static bool apply_runtime_serial(int fd, size_t index,
 
 static void handle_setporttimeout(int fd, char *spec, char *timeout_tok)
 {
+#if !ENABLE_DYNAMIC_SESSIONS
+    (void) spec;
+    (void) timeout_tok;
+    send_line(fd, "Dynamic configuration disabled in this build.");
+    return;
+#else
     if (!spec || !timeout_tok) {
         send_line(fd, "Usage: setporttimeout <tcp port> <seconds>");
         return;
@@ -764,6 +799,7 @@ static void handle_setporttimeout(int fd, char *spec, char *timeout_tok)
     fill_params_from_cfg(&control_context.ports[index], &params);
     if (apply_runtime_serial(fd, index, &params, (uint32_t)seconds * 1000U, false, NULL))
         send_line(fd, "Timeout updated.");
+#endif
 }
 
 static bool parse_setportconfig(const char *config_str,
@@ -842,6 +878,12 @@ static bool parse_setportconfig(const char *config_str,
 
 static void handle_setportcontrol(int fd, char *spec, char *controls)
 {
+#if !ENABLE_DYNAMIC_SESSIONS
+    (void) spec;
+    (void) controls;
+    send_line(fd, "Dynamic configuration disabled in this build.");
+    return;
+#else
     if (!spec || !controls) {
         send_line(fd, "Usage: setportcontrol <tcp port> <RTS/DTR tokens>");
         return;
@@ -887,10 +929,17 @@ static void handle_setportcontrol(int fd, char *spec, char *controls)
         send_line(fd, "Port control updated.");
     else
         send_line(fd, "setportcontrol failed or unsupported token.");
+#endif
 }
 
 static void handle_setportenable(int fd, char *spec, char *state)
 {
+#if !ENABLE_DYNAMIC_SESSIONS
+    (void) spec;
+    (void) state;
+    send_line(fd, "Dynamic configuration disabled in this build.");
+    return;
+#else
     if (!spec || !state) {
         send_line(fd, "Usage: setportenable <tcp port> <off|raw|rawlp|telnet>");
         return;
@@ -931,9 +980,10 @@ static void handle_setportenable(int fd, char *spec, char *state)
     struct ser2net_esp32_serial_port_cfg *mutable_cfg =
         (struct ser2net_esp32_serial_port_cfg *)&control_context.ports[index];
     mutable_cfg->mode = mode;
-    mutable_cfg->enabled = enable;
+   mutable_cfg->enabled = enable;
 
     send_line(fd, enable ? "Port enabled." : "Port disabled.");
+#endif
 }
 
 static void serve_client(int client_fd)
@@ -1071,6 +1121,7 @@ bool ser2net_control_start(const struct ser2net_control_context *ctx)
         control_context.port_count = 0;
     if (!control_context.version)
         control_context.version = DEFAULT_VERSION;
+#if ENABLE_MONITORING
     monitor_state.type = MONITOR_NONE;
     monitor_state.tcp_port = 0;
     if (!monitor_queue) {
@@ -1080,6 +1131,7 @@ bool ser2net_control_start(const struct ser2net_control_context *ctx)
     } else {
         xQueueReset(monitor_queue);
     }
+#endif
     control_running = true;
     if (xTaskCreate(control_task, "ser2net_ctrl",
                     4096, NULL, tskIDLE_PRIORITY + 1,
@@ -1104,14 +1156,17 @@ void ser2net_control_stop(void)
         vTaskDelete(control_task_handle);
         control_task_handle = NULL;
     }
+#if ENABLE_MONITORING
     monitor_state.type = MONITOR_NONE;
     monitor_state.tcp_port = 0;
     if (monitor_queue) {
         vQueueDelete(monitor_queue);
         monitor_queue = NULL;
     }
+#endif
 }
 
+#if ENABLE_MONITORING
 void ser2net_control_monitor_feed(uint16_t tcp_port,
                                   enum ser2net_monitor_stream stream,
                                   const uint8_t *data,
@@ -1143,3 +1198,15 @@ void ser2net_control_monitor_feed(uint16_t tcp_port,
         len -= chunk;
     }
 }
+#else
+void ser2net_control_monitor_feed(uint16_t tcp_port,
+                                  enum ser2net_monitor_stream stream,
+                                  const uint8_t *data,
+                                  size_t len)
+{
+    (void) tcp_port;
+    (void) stream;
+    (void) data;
+    (void) len;
+}
+#endif

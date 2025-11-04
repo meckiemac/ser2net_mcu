@@ -1,7 +1,7 @@
 /*
  * ser2net MCU - Embedded RFC2217 runtime
  *
- * Copyright (C) 2024  Your Name / Your Organisation
+ * Copyright (C) 2025  Andreas Merk
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+
+#include "ser2net_opts.h"
+
+#if ENABLE_JSON_CONFIG
 
 /*
  * JSON configuration loader (cJSON backed)
@@ -477,3 +481,31 @@ ser2net_load_config_json_esp32(const char *json,
     cJSON_Delete(root);
     return pdPASS;
 }
+#else
+
+#include "json_config.h"
+
+BaseType_t
+ser2net_load_config_json_esp32(const char *json,
+        struct ser2net_app_config *app_cfg,
+        struct ser2net_esp32_network_cfg *net_cfg,
+        struct ser2net_esp32_serial_cfg *serial_cfg,
+        struct ser2net_esp32_serial_port_cfg *ports,
+        size_t max_ports)
+{
+    (void) json;
+    (void) app_cfg;
+    (void) net_cfg;
+    (void) serial_cfg;
+    (void) ports;
+    (void) max_ports;
+    return pdFAIL;
+}
+
+const char *
+ser2net_json_last_error(void)
+{
+    return "JSON configuration disabled";
+}
+
+#endif /* ENABLE_JSON_CONFIG */

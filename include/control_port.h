@@ -1,7 +1,7 @@
 /*
  * ser2net MCU - Embedded RFC2217 runtime
  *
- * Copyright (C) 2024  Your Name / Your Organisation
+ * Copyright (C) 2025  Andreas Merk
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "ser2net_opts.h"
 
 #include "freertos/FreeRTOS.h"
 
@@ -83,5 +85,26 @@ void ser2net_control_monitor_feed(uint16_t tcp_port,
                                   enum ser2net_monitor_stream stream,
                                   const uint8_t *data,
                                   size_t len);
+
+#if !ENABLE_CONTROL_PORT
+static inline bool ser2net_control_start(const struct ser2net_control_context *ctx)
+{
+    (void) ctx;
+    return false;
+}
+
+static inline void ser2net_control_stop(void) {}
+
+static inline void ser2net_control_monitor_feed(uint16_t tcp_port,
+                                                enum ser2net_monitor_stream stream,
+                                                const uint8_t *data,
+                                                size_t len)
+{
+    (void) tcp_port;
+    (void) stream;
+    (void) data;
+    (void) len;
+}
+#endif
 
 #endif /* SER2NET_CONTROL_PORT_H */

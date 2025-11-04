@@ -1,7 +1,7 @@
 /*
  * ser2net MCU - Embedded RFC2217 runtime
  *
- * Copyright (C) 2024  Your Name / Your Organisation
+ * Copyright (C) 2025  Andreas Merk
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -298,7 +298,11 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     }
     runtime_state.cfg.control_ctx.ports = runtime_state.port_table;
     runtime_state.cfg.control_ctx.port_count = runtime_state.port_count;
+#if ENABLE_DYNAMIC_SESSIONS
     runtime_state.cfg.control_ctx.add_port_cb = ser2net_runtime_add_port;
+#else
+    runtime_state.cfg.control_ctx.add_port_cb = NULL;
+#endif
 
     ESP_LOGI("ser2net_runtime", "Starting runtime with %zu listener(s)",
              (size_t)cfg->listener_count);
@@ -316,6 +320,7 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     }
     active_sessions_clear();
 
+#if ENABLE_DYNAMIC_SESSIONS
     runtime_state.port_lock = xSemaphoreCreateMutex();
     if (!runtime_state.port_lock) {
         vSemaphoreDelete(runtime_state.active_lock);
@@ -325,6 +330,9 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
         runtime_state.session_capacity = 0;
         return pdFAIL;
     }
+#else
+    runtime_state.port_lock = NULL;
+#endif
 
     runtime_state.listener_count = 0;
     for (size_t i = 0; i < cfg->listener_count; ++i) {
@@ -356,8 +364,13 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
 
     runtime_state.cfg.control_ctx.disconnect_cb = ser2net_runtime_disconnect_tcp_port;
     runtime_state.cfg.control_ctx.list_sessions_cb = ser2net_runtime_list_sessions;
+#if ENABLE_DYNAMIC_SESSIONS
     runtime_state.cfg.control_ctx.set_serial_config_cb = ser2net_runtime_update_serial_config;
     runtime_state.cfg.control_ctx.set_port_mode_cb = ser2net_runtime_set_port_mode;
+#else
+    runtime_state.cfg.control_ctx.set_serial_config_cb = NULL;
+    runtime_state.cfg.control_ctx.set_port_mode_cb = NULL;
+#endif
 
     if (runtime_state.cfg.control_enabled && runtime_state.cfg.control_ctx.tcp_port > 0) {
         if (ser2net_control_start(&runtime_state.cfg.control_ctx)) {
@@ -442,7 +455,9 @@ ser2net_runtime_stop(void)
     }
 
     if (runtime_state.port_lock) {
+#if ENABLE_DYNAMIC_SESSIONS
         vSemaphoreDelete(runtime_state.port_lock);
+#endif
         runtime_state.port_lock = NULL;
     }
 
@@ -523,6 +538,14 @@ ser2net_runtime_update_serial_config(uint16_t tcp_port,
                                      bool apply_active,
                                      const struct ser2net_pin_config *pins)
 {
+#if !ENABLE_DYNAMIC_SESSIONS
+    (void) tcp_port;
+    (void) params;
+    (void) idle_timeout_ms;
+    (void) apply_active;
+    (void) pins;
+    return pdFAIL;
+#else
     if (!params)
         return pdFAIL;
 
@@ -628,6 +651,7 @@ ser2net_runtime_update_serial_config(uint16_t tcp_port,
 
     runtime_notify_config_changed();
     return pdPASS;
+#endif
 }
 
 BaseType_t
@@ -635,6 +659,12 @@ ser2net_runtime_set_port_mode(uint16_t tcp_port,
                               enum ser2net_port_mode mode,
                               bool enable)
 {
+#if !ENABLE_DYNAMIC_SESSIONS
+    (void) tcp_port;
+    (void) mode;
+    (void) enable;
+    return pdFAIL;
+#else
     int listener_index = -1;
     for (size_t i = 0; i < runtime_state.listener_count; ++i) {
         if (runtime_state.listeners[i].tcp_port == tcp_port) {
@@ -673,6 +703,7 @@ ser2net_runtime_set_port_mode(uint16_t tcp_port,
 
     runtime_notify_config_changed();
     return pdPASS;
+#endif
 }
 
 size_t
@@ -693,6 +724,7 @@ ser2net_runtime_copy_ports(struct ser2net_esp32_serial_port_cfg *out, size_t max
     return copied;
 }
 
+#if ENABLE_DYNAMIC_SESSIONS
 BaseType_t
 ser2net_runtime_add_port(const struct ser2net_esp32_serial_port_cfg *cfg)
 {
@@ -833,7 +865,16 @@ out:
 
     return result;
 }
+#else
+BaseType_t
+ser2net_runtime_add_port(const struct ser2net_esp32_serial_port_cfg *cfg)
+{
+    (void) cfg;
+    return pdFAIL;
+}
+#endif
 
+#if ENABLE_DYNAMIC_SESSIONS
 BaseType_t
 ser2net_runtime_remove_port(uint16_t tcp_port)
 {
@@ -940,3 +981,11 @@ out:
 
     return result;
 }
+#else
+BaseType_t
+ser2net_runtime_remove_port(uint16_t tcp_port)
+{
+    (void) tcp_port;
+    return pdFAIL;
+}
+#endif
