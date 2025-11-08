@@ -32,6 +32,14 @@
 
 static struct ser2net_runtime_config g_runtime_cfg;
 
+/**
+ * @brief Populate ::ser2net_runtime_config with conservative defaults.
+ *
+ * The defaults favour stability over absolute throughput so applications can
+ * tweak only the fields they care about.
+ *
+ * @param cfg Destination structure (must not be NULL).
+ */
 void
 ser2net_runtime_config_init(struct ser2net_runtime_config *cfg)
 {
@@ -56,6 +64,11 @@ ser2net_runtime_config_init(struct ser2net_runtime_config *cfg)
     cfg->config_changed_ctx = NULL;
 }
 
+/**
+ * @brief Initialise ::ser2net_basic_session_cfg with safe buffer sizes.
+ *
+ * @param cfg Destination structure (must not be NULL).
+ */
 void
 ser2net_session_config_init(struct ser2net_basic_session_cfg *cfg)
 {
@@ -66,6 +79,12 @@ ser2net_session_config_init(struct ser2net_basic_session_cfg *cfg)
     cfg->serial_buf_size = 512;
 }
 
+/**
+ * @brief Convenience façade that ties adapters, session ops, and runtime start.
+ *
+ * @param cfg Aggregated application configuration (adapters + defaults).
+ * @return `pdPASS` when the runtime is fully operational.
+ */
 BaseType_t
 ser2net_start(const struct ser2net_app_config *cfg)
 {
@@ -87,6 +106,9 @@ ser2net_start(const struct ser2net_app_config *cfg)
     return ser2net_runtime_start(&g_runtime_cfg);
 }
 
+/**
+ * @brief Stop the runtime that was launched via ::ser2net_start().
+ */
 void
 ser2net_stop(void)
 {

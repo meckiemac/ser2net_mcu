@@ -88,7 +88,13 @@ static const struct ser2net_network_if g_esp32_network_if_template = {
     .client_shutdown = esp32_client_shutdown
 };
 
-/* Open a TCP listener bound to the configured IP/port. */
+/**
+ * @brief Open a TCP listener bound to the configured IP/port.
+ *
+ * @param ctx Pointer to ::esp32_network_ctx describing the socket.
+ * @param out_listener Receives the opaque listener handle on success.
+ * @return `pdPASS` when the socket is ready, otherwise `pdFAIL`.
+ */
 static BaseType_t
 esp32_open_listener(void *ctx, ser2net_listener_handle_t *out_listener)
 {
@@ -121,7 +127,15 @@ esp32_open_listener(void *ctx, ser2net_listener_handle_t *out_listener)
     return pdPASS;
 }
 
-/* Wait for incoming connections (with optional timeout). */
+/**
+ * @brief Wait for incoming connections (with optional timeout).
+ *
+ * @param ctx Unused (kept for API symmetry).
+ * @param listener Handle returned by ::esp32_open_listener().
+ * @param out_client Receives the accepted client.
+ * @param timeout_ticks FreeRTOS ticks to wait (or `portMAX_DELAY`).
+ * @return `pdPASS` on success, otherwise `pdFAIL`.
+ */
 static BaseType_t
 esp32_accept_client(void *ctx, ser2net_listener_handle_t listener,
                     ser2net_client_handle_t *out_client, TickType_t timeout_ticks)
@@ -166,7 +180,12 @@ esp32_accept_client(void *ctx, ser2net_listener_handle_t listener,
     return pdPASS;
 }
 
-/* Gracefully close a client socket. */
+/**
+ * @brief Gracefully close a client socket and reclaim memory.
+ *
+ * @param ctx Unused.
+ * @param client_handle Handle returned by ::esp32_accept_client().
+ */
 static void
 esp32_close_client(void *ctx, ser2net_client_handle_t client_handle)
 {
@@ -180,7 +199,16 @@ esp32_close_client(void *ctx, ser2net_client_handle_t client_handle)
     vPortFree(client);
 }
 
-/* Poll socket for data, respecting timeout semantics used by runtime. */
+/**
+ * @brief Poll a socket for data while honouring runtime timeouts.
+ *
+ * @param ctx Unused.
+ * @param client_handle Accepted client handle.
+ * @param buf Destination buffer.
+ * @param len Maximum number of bytes to read.
+ * @param timeout_ticks Maximum wait in FreeRTOS ticks.
+ * @return Bytes read, 0 on timeout, or -1/-2 on error/disconnect.
+ */
 static int
 esp32_client_recv(void *ctx, ser2net_client_handle_t client_handle,
                   void *buf, size_t len, TickType_t timeout_ticks)
@@ -224,7 +252,16 @@ esp32_client_recv(void *ctx, ser2net_client_handle_t client_handle,
     return rv;
 }
 
-/* Push data to the network (non-blocking, optional timeout). */
+/**
+ * @brief Push bytes to the network (non-blocking).
+ *
+ * @param ctx Unused.
+ * @param client_handle Accepted client handle.
+ * @param buf Payload to send.
+ * @param len Payload size.
+ * @param timeout_ticks Unused (API symmetry).
+ * @return Bytes written, 0 on EAGAIN, -1 on fatal error.
+ */
 static int
 esp32_client_send(void *ctx, ser2net_client_handle_t client_handle,
                   const void *buf, size_t len, TickType_t timeout_ticks)
@@ -246,6 +283,12 @@ esp32_client_send(void *ctx, ser2net_client_handle_t client_handle,
     return rv;
 }
 
+/**
+ * @brief Trigger a shutdown on the peer socket to force disconnect.
+ *
+ * @param ctx Unused.
+ * @param client_handle Accepted client handle.
+ */
 static void
 esp32_client_shutdown(void *ctx, ser2net_client_handle_t client_handle)
 {
@@ -258,6 +301,12 @@ esp32_client_shutdown(void *ctx, ser2net_client_handle_t client_handle)
     shutdown(client->fd, SHUT_RDWR);
 }
 
+/**
+ * @brief Obtain a network adapter instance for the requested TCP listener.
+ *
+ * @param cfg TCP port/backlog description.
+ * @return Pointer to a dedicated ::ser2net_network_if or NULL when exhausted.
+ */
 const struct ser2net_network_if *
 ser2net_esp32_get_network_if(const struct ser2net_esp32_network_cfg *cfg)
 {
@@ -280,6 +329,12 @@ ser2net_esp32_get_network_if(const struct ser2net_esp32_network_cfg *cfg)
     return NULL;
 }
 
+/**
+ * @brief Release a network_if slot (and close any lingering socket).
+ *
+ * @param iface Network interface previously returned by
+ *              ::ser2net_esp32_get_network_if().
+ */
 void
 ser2net_esp32_release_network_if(const struct ser2net_network_if *iface)
 {
@@ -325,7 +380,14 @@ struct esp32_serial_handle {
 
 static struct esp32_serial_ctx g_esp32_serial_ctx;
 
-/* Locate requested UART, install driver if needed and return handle. */
+/**
+ * @brief Locate the requested UART, install the driver, and return a handle.
+ *
+ * @param ctx Unused (kept for interface symmetry).
+ * @param port_id Logical port identifier requested by the runtime.
+ * @param out_serial Receives the opaque serial handle.
+ * @return `pdPASS` when the UART is ready, otherwise `pdFAIL`.
+ */
 static BaseType_t
 esp32_open_serial(void *ctx, int port_id, ser2net_serial_handle_t *out_serial)
 {
@@ -380,6 +442,12 @@ esp32_open_serial(void *ctx, int port_id, ser2net_serial_handle_t *out_serial)
     return pdFAIL;
 }
 
+/**
+ * @brief Close a UART handle previously returned by ::esp32_open_serial().
+ *
+ * @param ctx Unused.
+ * @param serial Handle to close.
+ */
 static void
 esp32_close_serial(void *ctx, ser2net_serial_handle_t serial)
 {
@@ -395,6 +463,16 @@ esp32_close_serial(void *ctx, ser2net_serial_handle_t serial)
     vPortFree(handle);
 }
 
+/**
+ * @brief Read bytes from the UART into the provided buffer.
+ *
+ * @param ctx Unused.
+ * @param serial UART handle returned by ::esp32_open_serial().
+ * @param buf Destination buffer.
+ * @param len Maximum number of bytes to read.
+ * @param timeout_ticks FreeRTOS ticks to wait for data.
+ * @return Number of bytes read or -1 on error.
+ */
 static int
 esp32_serial_read(void *ctx, ser2net_serial_handle_t serial,
                   void *buf, size_t len, TickType_t timeout_ticks)
@@ -412,6 +490,15 @@ esp32_serial_read(void *ctx, ser2net_serial_handle_t serial,
     return rv;
 }
 
+/**
+ * @brief Write bytes to the UART.
+ *
+ * @param ctx Unused.
+ * @param serial UART handle.
+ * @param buf Payload to transmit.
+ * @param len Payload size.
+ * @return Number of bytes written or -1 on error.
+ */
 static int
 esp32_serial_write(void *ctx, ser2net_serial_handle_t serial,
                    const void *buf, size_t len)
@@ -429,6 +516,17 @@ esp32_serial_write(void *ctx, ser2net_serial_handle_t serial,
     return rv;
 }
 
+/**
+ * @brief Apply baud/format/flow changes to an active UART.
+ *
+ * @param ctx Unused.
+ * @param serial UART handle.
+ * @param baud Desired baud rate.
+ * @param data_bits Desired number of data bits.
+ * @param parity RFC2217 parity code.
+ * @param stop_bits RFC2217 stop-bit code (1,2,15=1.5).
+ * @param flow_control 0=off, 1=CTS/RTS.
+ */
 static BaseType_t
 esp32_serial_configure(void *ctx, ser2net_serial_handle_t serial,
                        int baud, int data_bits, int parity,
@@ -513,6 +611,12 @@ static const struct ser2net_serial_if g_esp32_serial_if = {
     .serial_configure = esp32_serial_configure
 };
 
+/**
+ * @brief Obtain the singleton serial adapter (installs UART drivers on demand).
+ *
+ * @param cfg Optional configuration blob listing all UARTs/pins.
+ * @return Pointer to the shared ::ser2net_serial_if instance.
+ */
 const struct ser2net_serial_if *
 ser2net_esp32_get_serial_if(const struct ser2net_esp32_serial_cfg *cfg)
 {
@@ -535,6 +639,12 @@ ser2net_esp32_get_serial_if(const struct ser2net_esp32_serial_cfg *cfg)
     return &g_esp32_serial_if;
 }
 
+/**
+ * @brief Register a dynamically added UART/TCP tuple with the adapter.
+ *
+ * @param cfg Port description (pins, uart number, baud, etc.).
+ * @return `pdPASS` on success, otherwise `pdFAIL`.
+ */
 BaseType_t
 ser2net_esp32_register_port(const struct ser2net_esp32_serial_port_cfg *cfg)
 {
@@ -559,6 +669,14 @@ ser2net_esp32_register_port(const struct ser2net_esp32_serial_port_cfg *cfg)
     return pdPASS;
 }
 
+/**
+ * @brief Remove a port definition previously registered at runtime.
+ *
+ * Ensures the UART driver is torn down and compacts the configuration table so
+ * subsequent additions reuse the freed slot.
+ *
+ * @param port_id Logical port identifier to remove.
+ */
 void
 ser2net_esp32_unregister_port(int port_id)
 {

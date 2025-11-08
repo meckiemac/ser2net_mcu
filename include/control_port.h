@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "ser2net_opts.h"
+#include "monitor_bus.h"
 
 #include "freertos/FreeRTOS.h"
 
@@ -70,21 +71,18 @@ struct ser2net_control_context {
     BaseType_t (*add_port_cb)(const struct ser2net_esp32_serial_port_cfg *cfg);
 };
 
-/** @brief Streams that can be mirrored by the control port monitor. */
-enum ser2net_monitor_stream {
-    SER2NET_MONITOR_STREAM_TCP = 0,
-    SER2NET_MONITOR_STREAM_TERM = 1
-};
-
 /** @brief Start the control port task. */
 bool ser2net_control_start(const struct ser2net_control_context *ctx);
 /** @brief Stop the control port task. */
 void ser2net_control_stop(void);
-/** @brief Feed captured data into the monitor channel. */
-void ser2net_control_monitor_feed(uint16_t tcp_port,
-                                  enum ser2net_monitor_stream stream,
-                                  const uint8_t *data,
-                                  size_t len);
+
+static inline void ser2net_control_monitor_feed(uint16_t tcp_port,
+                                                enum ser2net_monitor_stream stream,
+                                                const uint8_t *data,
+                                                size_t len)
+{
+    ser2net_monitor_feed(tcp_port, stream, data, len);
+}
 
 #if !ENABLE_CONTROL_PORT
 static inline bool ser2net_control_start(const struct ser2net_control_context *ctx)
@@ -95,16 +93,6 @@ static inline bool ser2net_control_start(const struct ser2net_control_context *c
 
 static inline void ser2net_control_stop(void) {}
 
-static inline void ser2net_control_monitor_feed(uint16_t tcp_port,
-                                                enum ser2net_monitor_stream stream,
-                                                const uint8_t *data,
-                                                size_t len)
-{
-    (void) tcp_port;
-    (void) stream;
-    (void) data;
-    (void) len;
-}
 #endif
 
 #endif /* SER2NET_CONTROL_PORT_H */

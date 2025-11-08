@@ -77,6 +77,22 @@ struct ser2net_runtime_state {
 
 static struct ser2net_runtime_state runtime_state;
 
+struct session_job {
+    int port_id;
+    ser2net_client_handle_t client;
+    const struct ser2net_network_if *network;
+    uint16_t tcp_port;
+};
+
+/**
+ * @brief Pick the first unused numeric port identifier.
+ *
+ * Dynamic additions may omit an explicit `port_id`.  This helper scans the
+ * current port table and returns the first free slot (0-255) so that both the
+ * runtime and the session layer can keep a consistent mapping.
+ *
+ * @return Non-negative port id on success, or -1 if all ids are exhausted.
+ */
 static int
 runtime_allocate_port_id(void)
 {
@@ -94,6 +110,13 @@ runtime_allocate_port_id(void)
     return -1;
 }
 
+/**
+ * @brief Invoke the application level config change callback.
+ *
+ * The control port, REST API, and JSON loader all mutate the runtime state.
+ * Whenever such a change succeeds, this helper fires the optional callback so
+ * higher layers can persist the new topology or refresh dashboards.
+ */
 static void
 runtime_notify_config_changed(void)
 {
@@ -101,13 +124,12 @@ runtime_notify_config_changed(void)
         runtime_state.cfg.config_changed_cb(runtime_state.cfg.config_changed_ctx);
 }
 
-struct session_job {
-    int port_id;
-    ser2net_client_handle_t client;
-    const struct ser2net_network_if *network;
-    uint16_t tcp_port;
-};
-
+/**
+ * @brief Reset the book-keeping entries for active sessions.
+ *
+ * Called during startup or after the worker pool shuts down to ensure no stale
+ * `in_use` flags remain in the session registry.
+ */
 static void
 active_sessions_clear(void)
 {
@@ -117,6 +139,13 @@ active_sessions_clear(void)
         runtime_state.sessions[i].in_use = false;
 }
 
+/**
+ * @brief Track a freshly accepted TCP client.
+ *
+ * Stores the tuple `{tcp_port, network_if, client, serial, session_ctx}` in the
+ * active session array, allowing control-path code to enumerate and interact
+ * with it later (disconnect requests, live config pushes, etc.).
+ */
 static bool
 active_sessions_register(uint16_t tcp_port,
                          int port_id,
@@ -150,6 +179,12 @@ active_sessions_register(uint16_t tcp_port,
     return stored;
 }
 
+/**
+ * @brief Remove a client from the active session table.
+ *
+ * Once a worker finishes or encounters an error this function clears the slot
+ * so the disconnect logic and monitoring code stop referencing the stale entry.
+ */
 static void
 active_sessions_unregister(uint16_t tcp_port, ser2net_client_handle_t client)
 {
@@ -181,11 +216,13 @@ struct session_init_param {
 };
 
 /**
- * session_task()
+ * @brief Worker loop executed by every session task.
  *
- * Worker loop executed by every session task.  Waits for jobs on the queue,
- * opens the requested UART, initialises RFC2217 handling and pumps data until
- * either side disconnects.
+ * Each worker pulls jobs from the queue, opens the requested UART, initialises
+ * the RFC2217 session helper, and keeps pumping data until either side
+ * disconnects.
+ *
+ * @param param Points to the global ::ser2net_runtime_state structure.
  */
 static void session_task(void *param)
 {
@@ -236,11 +273,13 @@ static void session_task(void *param)
 }
 
 /**
- * listener_task()
+ * @brief Accept connections on all configured TCP listeners.
  *
- * Iterates over all configured TCP listeners.  Whenever a listener has a
- * pending connection, enqueue a job for the worker pool.  The short retry
- * delay avoids busy-spinning when the queue is full.
+ * The listener task walks over every registered listener, accepts pending
+ * clients, and enqueues work items for the session pool.  A small retry delay
+ * prevents busy-spinning when no sockets are ready.
+ *
+ * @param param Runtime state pointer shared with the worker tasks.
  */
 static void listener_task(void *param)
 {
@@ -251,6 +290,8 @@ static void listener_task(void *param)
     memset(&job, 0, sizeof(job));
 
     for (;;) {
+        bool accepted_any = false;
+
         for (size_t i = 0; i < state->listener_count; ++i) {
             struct listener_entry *entry = &state->listeners[i];
             if (!entry->enabled)
@@ -262,6 +303,7 @@ static void listener_task(void *param)
             if (rv != pdPASS)
                 continue;
 
+            accepted_any = true;
             job.port_id = entry->port_id;
             job.network = entry->net;
             job.tcp_port = entry->tcp_port;
@@ -271,21 +313,34 @@ static void listener_task(void *param)
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
+
+        if (!accepted_any) {
+            TickType_t delay = cfg->accept_poll_ticks;
+            if (delay == 0 || delay == portMAX_DELAY)
+                delay = pdMS_TO_TICKS(50);
+            vTaskDelay(delay);
+        }
     }
 }
 
 /**
- * ser2net_runtime_start()
+ * @brief Boot the networking runtime and spawn the worker tasks.
  *
- * Entrypoint used by the application to bootstrap networking and session
- * workers.  Creates one network listener per UART, allocates the worker pool
- * and optionally starts the control port.
+ * Creates one TCP listener per configured port, builds the session job queue,
+ * and launches the listener/worker tasks.  When requested it also starts the
+ * Telnet-style control port.
+ *
+ * @param cfg Fully populated runtime configuration.
+ * @return `pdPASS` when the runtime is operational, `pdFAIL` otherwise.
  */
 BaseType_t
 ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
 {
     memset(&runtime_state, 0, sizeof(runtime_state));
     runtime_state.cfg = *cfg;
+    if (runtime_state.cfg.max_sessions == 0)
+        runtime_state.cfg.max_sessions = 1;
+    size_t session_slots = runtime_state.cfg.max_sessions;
 
     runtime_state.port_count = 0;
     if (cfg->control_ctx.ports && cfg->control_ctx.port_count > 0) {
@@ -307,10 +362,10 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     ESP_LOGI("ser2net_runtime", "Starting runtime with %zu listener(s)",
              (size_t)cfg->listener_count);
 
-    runtime_state.sessions = pvPortMalloc(cfg->max_sessions * sizeof(struct active_session_entry));
+    runtime_state.sessions = pvPortMalloc(session_slots * sizeof(struct active_session_entry));
     if (!runtime_state.sessions)
         return pdFAIL;
-    runtime_state.session_capacity = cfg->max_sessions;
+    runtime_state.session_capacity = session_slots;
     runtime_state.active_lock = xSemaphoreCreateMutex();
     if (!runtime_state.active_lock) {
         vPortFree(runtime_state.sessions);
@@ -372,7 +427,11 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     runtime_state.cfg.control_ctx.set_port_mode_cb = NULL;
 #endif
 
-    if (runtime_state.cfg.control_enabled && runtime_state.cfg.control_ctx.tcp_port > 0) {
+    if (runtime_state.listener_count == 0) {
+        runtime_state.cfg.control_enabled = false;
+        runtime_state.control_started = false;
+        ESP_LOGI("ser2net_runtime", "Skipping control port (no listeners configured)");
+    } else if (runtime_state.cfg.control_enabled && runtime_state.cfg.control_ctx.tcp_port > 0) {
         if (ser2net_control_start(&runtime_state.cfg.control_ctx)) {
             runtime_state.control_started = true;
             ESP_LOGI("ser2net_runtime", "Control port listening on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
@@ -383,7 +442,7 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
         runtime_state.control_started = false;
     }
 
-    runtime_state.job_queue = xQueueCreate(cfg->max_sessions, sizeof(struct session_job));
+    runtime_state.job_queue = xQueueCreate(session_slots, sizeof(struct session_job));
     if (!runtime_state.job_queue) {
         vSemaphoreDelete(runtime_state.active_lock);
         runtime_state.active_lock = NULL;
@@ -402,7 +461,7 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
         return pdFAIL;
     }
 
-    for (size_t i = 0; i < cfg->max_sessions; ++i) {
+    for (size_t i = 0; i < session_slots; ++i) {
         TaskHandle_t task_handle = NULL;
         if (xTaskCreate(session_task,
                         cfg->session_task_name ? cfg->session_task_name : "ser2net_sess",
@@ -421,10 +480,10 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
 }
 
 /**
- * ser2net_runtime_stop()
+ * @brief Tear down all runtime resources created by ::ser2net_runtime_start().
  *
- * Reverse the setup performed in ser2net_runtime_start(): stop the control
- * port, shut down listener / worker tasks and release allocated listeners.
+ * Stops the control port, cancels listener/worker tasks, destroys queues and
+ * mutexes, and returns adapter slots to the pool.
  */
 void
 ser2net_runtime_stop(void)
@@ -475,6 +534,13 @@ ser2net_runtime_stop(void)
     runtime_state.listener_count = 0;
 }
 
+/**
+ * @brief Copy information about currently active TCP sessions.
+ *
+ * @param out Optional destination array for up to @p max_entries results.
+ * @param max_entries Capacity of the @p out array.
+ * @return Total number of active sessions at the time of the snapshot.
+ */
 size_t
 ser2net_runtime_list_sessions(struct ser2net_active_session *out, size_t max_entries)
 {
@@ -502,6 +568,12 @@ ser2net_runtime_list_sessions(struct ser2net_active_session *out, size_t max_ent
     return reported;
 }
 
+/**
+ * @brief Ask the network adapter to shutdown the oldest session on a port.
+ *
+ * @param tcp_port Listener whose next client should be dropped.
+ * @return true when a matching client was found and signalled, else false.
+ */
 bool
 ser2net_runtime_disconnect_tcp_port(uint16_t tcp_port)
 {
@@ -531,9 +603,18 @@ ser2net_runtime_disconnect_tcp_port(uint16_t tcp_port)
     return true;
 }
 
+/**
+ * @brief Update stored serial defaults and optionally live sessions.
+ *
+ * @param tcp_port Listener identifier used to locate the port metadata.
+ * @param params New serial defaults (baud, parity, etc.).
+ * @param idle_timeout_ms Optional idle timeout override.
+ * @param apply_active When true the new params are pushed to current sessions.
+ * @param pins Optional UART routing changes (pins and/or peripheral number).
+ */
 BaseType_t
 ser2net_runtime_update_serial_config(uint16_t tcp_port,
-                                     const struct ser2net_serial_params *params,
+                                               const struct ser2net_serial_params *params,
                                      uint32_t idle_timeout_ms,
                                      bool apply_active,
                                      const struct ser2net_pin_config *pins)
@@ -654,9 +735,19 @@ ser2net_runtime_update_serial_config(uint16_t tcp_port,
 #endif
 }
 
+/**
+ * @brief Change framed mode (telnet/raw) and enable state of a listener.
+ *
+ * Called by the control shell, REST API, or Web UI to toggle the service state
+ * of a port without removing it entirely.
+ *
+ * @param tcp_port Listener that should be updated.
+ * @param mode New ::ser2net_port_mode value.
+ * @param enable True to keep accepting clients, false to disable the listener.
+ */
 BaseType_t
 ser2net_runtime_set_port_mode(uint16_t tcp_port,
-                              enum ser2net_port_mode mode,
+                                         enum ser2net_port_mode mode,
                               bool enable)
 {
 #if !ENABLE_DYNAMIC_SESSIONS
@@ -706,6 +797,16 @@ ser2net_runtime_set_port_mode(uint16_t tcp_port,
 #endif
 }
 
+/**
+ * @brief Export the internal port table.
+ *
+ * Mainly used by the Web/UI layers to show the current configuration without
+ * holding the mutex longer than necessary.
+ *
+ * @param out Destination array.
+ * @param max_ports Capacity of @p out.
+ * @return Number of entries copied.
+ */
 size_t
 ser2net_runtime_copy_ports(struct ser2net_esp32_serial_port_cfg *out, size_t max_ports)
 {
@@ -725,6 +826,15 @@ ser2net_runtime_copy_ports(struct ser2net_esp32_serial_port_cfg *out, size_t max
 }
 
 #if ENABLE_DYNAMIC_SESSIONS
+/**
+ * @brief Add a new UART/TCP pairing at runtime.
+ *
+ * Validates that the IDs and sockets are unused, registers the UART, makes the
+ * session layer aware of the defaults, and spins up a matching TCP listener.
+ *
+ * @param cfg Fully populated port description (pins, baud, tcp port, ...).
+ * @return `pdPASS` on success, `pdFAIL` otherwise.
+ */
 BaseType_t
 ser2net_runtime_add_port(const struct ser2net_esp32_serial_port_cfg *cfg)
 {
@@ -860,8 +970,20 @@ out:
 
     xSemaphoreGive(runtime_state.port_lock);
 
-    if (result == pdPASS)
+    if (result == pdPASS) {
         runtime_notify_config_changed();
+
+        if (!runtime_state.control_started &&
+            runtime_state.cfg.control_enabled &&
+            runtime_state.cfg.control_ctx.tcp_port > 0) {
+            if (ser2net_control_start(&runtime_state.cfg.control_ctx)) {
+                runtime_state.control_started = true;
+                ESP_LOGI("ser2net_runtime", "Control port listening on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
+            } else {
+                ESP_LOGW("ser2net_runtime", "Failed to start control port on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
+            }
+        }
+    }
 
     return result;
 }
@@ -875,6 +997,15 @@ ser2net_runtime_add_port(const struct ser2net_esp32_serial_port_cfg *cfg)
 #endif
 
 #if ENABLE_DYNAMIC_SESSIONS
+/**
+ * @brief Remove a runtime-added listener and free its resources.
+ *
+ * Disconnects active clients, releases UART/network resources, and shrinks the
+ * control/rule tables so the change is reflected everywhere.
+ *
+ * @param tcp_port Listener to remove.
+ * @return `pdPASS` when the listener was removed, otherwise `pdFAIL`.
+ */
 BaseType_t
 ser2net_runtime_remove_port(uint16_t tcp_port)
 {

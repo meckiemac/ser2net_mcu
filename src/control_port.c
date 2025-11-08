@@ -86,8 +86,55 @@ static struct {
     enum monitor_type type;
     uint16_t tcp_port;
 } monitor_state = { MONITOR_NONE, 0 };
+
+/**
+ * @brief Queue monitor data so the CLI can stream it to the operator.
+ *
+ * Applies the current monitor filter (TCP vs TERM, selected port) and pushes
+ * chunks into the FreeRTOS queue consumed by ::flush_monitor_queue().
+ */
+static void control_monitor_sink(void *ctx,
+                                 uint16_t tcp_port,
+                                 enum ser2net_monitor_stream stream,
+                                 const uint8_t *data,
+                                 size_t len)
+{
+    (void) ctx;
+    if (!control_running || !monitor_queue || !data || len == 0)
+        return;
+
+    if (monitor_state.type == MONITOR_NONE)
+        return;
+    if (monitor_state.tcp_port != tcp_port)
+        return;
+    if ((monitor_state.type == MONITOR_TCP && stream != SER2NET_MONITOR_STREAM_TCP) ||
+        (monitor_state.type == MONITOR_TERM && stream != SER2NET_MONITOR_STREAM_TERM))
+        return;
+
+    while (len > 0) {
+        size_t chunk = len > MONITOR_CHUNK ? MONITOR_CHUNK : len;
+        struct monitor_message msg = {
+            .stream = stream,
+            .tcp_port = tcp_port,
+            .len = chunk
+        };
+        memcpy(msg.data, data, chunk);
+        if (xQueueSend(monitor_queue, &msg, 0) != pdPASS)
+            break;
+        data += chunk;
+        len -= chunk;
+    }
+}
 #endif
 
+/**
+ * @brief Parse CLI pin tokens such as `UART1`, `TX17`, `-CTS`, or `RXNA`.
+ *
+ * @param token Raw token from the control-port command.
+ * @param pins Optional struct that receives parsed values.
+ * @param uart_out Optional pointer filled with the parsed UART number.
+ * @return true on success, false on malformed tokens.
+ */
 static bool
 parse_pin_token(const char *token,
                 struct ser2net_pin_config *pins,
@@ -179,6 +226,9 @@ parse_pin_token(const char *token,
 
 #endif /* ENABLE_CONTROL_PORT */
 
+/**
+ * @brief Format a pin assignment for CLI output (e.g. `TX17` / `TXNA`).
+ */
 static const char *
 format_pin_token(const char *prefix, int value, char *buf, size_t len)
 {
@@ -191,7 +241,9 @@ format_pin_token(const char *prefix, int value, char *buf, size_t len)
     return buf;
 }
 
-/* Helper to send raw strings; guards against NULL for convenience. */
+/**
+ * @brief Helper to send raw strings; guards against NULL for convenience.
+ */
 static void send_str(int fd, const char *str)
 {
     if (!str)
@@ -199,18 +251,23 @@ static void send_str(int fd, const char *str)
     send(fd, str, strlen(str), 0);
 }
 
+/** @brief Send a CRLF terminated line to the control client. */
 static void send_line(int fd, const char *line)
 {
     send_str(fd, line);
     send(fd, "\r\n", 2, 0);
 }
 
+/** @brief Emit the interactive prompt. */
 static void send_prompt(int fd)
 {
     send_str(fd, "ser2net> ");
 }
 
 #if ENABLE_MONITORING
+/**
+ * @brief Drain queued monitor chunks and forward them to the CLI socket.
+ */
 static void flush_monitor_queue(int fd)
 {
     if (!monitor_queue)
@@ -253,6 +310,11 @@ static bool apply_runtime_serial(int fd, size_t index,
 static void handle_setportcontrol(int fd, char *spec, char *controls);
 static void handle_setportenable(int fd, char *spec, char *state);
 
+/**
+ * @brief Parse and execute a single command entered via the control port.
+ *
+ * @return true when the session should stay open, false to disconnect.
+ */
 static bool handle_command_line(int fd, char *line)
 {
     char *saveptr = NULL;
@@ -475,6 +537,7 @@ static bool handle_command_line(int fd, char *line)
 }
 
 /* Turn UART word-length enum values into strings for the shell output. */
+/** @brief Convert UART word-length enum into CLI friendly text. */
 static const char *uart_word_length_to_str(uart_word_length_t len)
 {
     switch (len) {
@@ -486,7 +549,7 @@ static const char *uart_word_length_to_str(uart_word_length_t len)
     }
 }
 
-/* Map UART parity enum to printable text. */
+/** @brief Translate parity enum to CLI string. */
 static const char *uart_parity_to_str(uart_parity_t parity)
 {
     switch (parity) {
@@ -497,7 +560,7 @@ static const char *uart_parity_to_str(uart_parity_t parity)
     }
 }
 
-/* Map UART stop-bits enum to printable text. */
+/** @brief Translate stop-bit enum to CLI string. */
 static const char *uart_stop_bits_to_str(uart_stop_bits_t stop_bits)
 {
     switch (stop_bits) {
@@ -508,7 +571,7 @@ static const char *uart_stop_bits_to_str(uart_stop_bits_t stop_bits)
     }
 }
 
-/* Map flow-control enum to printable text. */
+/** @brief Translate flow-control enum to CLI string. */
 static const char *uart_flow_to_str(uart_hw_flowcontrol_t flow)
 {
     switch (flow) {
@@ -520,7 +583,9 @@ static const char *uart_flow_to_str(uart_hw_flowcontrol_t flow)
     }
 }
 
-/* Locate a configured port using TCP port, port_id, or UART number. */
+/**
+ * @brief Locate a configured port using TCP port, port_id, or UART number.
+ */
 static const struct ser2net_esp32_serial_port_cfg *
 find_port_cfg(const char *spec)
 {
@@ -544,6 +609,7 @@ find_port_cfg(const char *spec)
     return NULL;
 }
 
+/** @brief Human readable representation for ::ser2net_port_mode. */
 static const char *port_mode_to_str(enum ser2net_port_mode mode)
 {
     switch (mode) {
@@ -555,6 +621,9 @@ static const char *port_mode_to_str(enum ser2net_port_mode mode)
     }
 }
 
+/**
+ * @brief Resolve a CLI port selector to an index in `control_context.ports`.
+ */
 static bool get_port_index(const char *spec, size_t *out_index)
 {
     if (!control_context.ports || !spec)
@@ -585,6 +654,9 @@ static bool get_port_index(const char *spec, size_t *out_index)
     return false;
 }
 
+/**
+ * @brief Convert stored UART metadata into ::ser2net_serial_params defaults.
+ */
 static void fill_params_from_cfg(const struct ser2net_esp32_serial_port_cfg *cfg,
                                  struct ser2net_serial_params *params)
 {
@@ -615,7 +687,9 @@ static void fill_params_from_cfg(const struct ser2net_esp32_serial_port_cfg *cfg
     params->flow_control = (cfg->flow_ctrl == UART_HW_FLOWCTRL_CTS_RTS) ? 1 : 0;
 }
 
-/* Look up how many active sessions live on a given port_id. */
+/**
+ * @brief Lookup helper that returns the active session counter for a port_id.
+ */
 static int sessions_for_port_id(int port_id,
                                 const int *port_ids,
                                 const int *sessions,
@@ -630,7 +704,9 @@ static int sessions_for_port_id(int port_id,
     return 0;
 }
 
-/* Verbose variant of showport with multi-line formatting. */
+/**
+ * @brief Verbose variant of `showport` with multi-line formatting.
+ */
 static void describe_port_long(int fd,
                                const struct ser2net_esp32_serial_port_cfg *cfg,
                                int active_sessions)
@@ -669,6 +745,9 @@ static void describe_port_long(int fd,
 }
 
 /* One-line summary used by showshortport/status. */
+/**
+ * @brief Single-line variant used by `showshortport`.
+ */
 static void describe_port_short(int fd,
                                 const struct ser2net_esp32_serial_port_cfg *cfg,
                                 int active_sessions)
@@ -693,7 +772,9 @@ static void describe_port_short(int fd,
     send_line(fd, line);
 }
 
-/* Backend for showport/showshortport/status commands. */
+/**
+ * @brief Backend for `showport`, `showshortport`, and status commands.
+ */
 static void handle_showport(int fd, const char *spec, bool short_format)
 {
     if (!control_context.ports || control_context.port_count == 0) {
@@ -729,7 +810,7 @@ static void handle_showport(int fd, const char *spec, bool short_format)
     }
 }
 
-/* Emit version banner (defaults to ser2net-mcu when unset). */
+/** @brief Emit version banner (defaults to ser2net-mcu when unset). */
 static void handle_version(int fd)
 {
     char line[96];
@@ -738,6 +819,9 @@ static void handle_version(int fd)
     send_line(fd, line);
 }
 
+/**
+ * @brief Forward a configuration update to the runtime and mirror the change locally.
+ */
 static bool apply_runtime_serial(int fd, size_t index,
                                  const struct ser2net_serial_params *params,
                                  uint32_t idle_timeout_ms,
@@ -772,6 +856,9 @@ static bool apply_runtime_serial(int fd, size_t index,
     return true;
 }
 
+/**
+ * @brief Implement the `setporttimeout` command.
+ */
 static void handle_setporttimeout(int fd, char *spec, char *timeout_tok)
 {
 #if !ENABLE_DYNAMIC_SESSIONS
@@ -802,6 +889,9 @@ static void handle_setporttimeout(int fd, char *spec, char *timeout_tok)
 #endif
 }
 
+/**
+ * @brief Parse the `<baud>/<flags>` syntax used by `setportconfig`.
+ */
 static bool parse_setportconfig(const char *config_str,
                                 struct ser2net_serial_params *params,
                                 struct ser2net_pin_config *pins)
@@ -876,6 +966,9 @@ static bool parse_setportconfig(const char *config_str,
     return true;
 }
 
+/**
+ * @brief Implement the legacy `setportcontrol` command from classic ser2net.
+ */
 static void handle_setportcontrol(int fd, char *spec, char *controls)
 {
 #if !ENABLE_DYNAMIC_SESSIONS
@@ -932,6 +1025,9 @@ static void handle_setportcontrol(int fd, char *spec, char *controls)
 #endif
 }
 
+/**
+ * @brief Enable/disable a listener and change its framing mode via CLI.
+ */
 static void handle_setportenable(int fd, char *spec, char *state)
 {
 #if !ENABLE_DYNAMIC_SESSIONS
@@ -986,6 +1082,9 @@ static void handle_setportenable(int fd, char *spec, char *state)
 #endif
 }
 
+/**
+ * @brief Command loop for a single control-port client socket.
+ */
 static void serve_client(int client_fd)
 {
     /* Main client REPL loop – respond to commands until connection closes. */
@@ -1049,6 +1148,9 @@ static void serve_client(int client_fd)
         xQueueReset(monitor_queue);
 }
 
+/**
+ * @brief FreeRTOS task that accepts telnet control sessions.
+ */
 static void control_task(void *arg)
 {
     /* Dedicated FreeRTOS task that owns the control socket. */
@@ -1108,6 +1210,12 @@ static void control_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/**
+ * @brief Start the Telnet-style control port (documented in control_port.h).
+ *
+ * @param ctx Control port configuration (tcp port, callbacks, etc.).
+ * @return true on success, false otherwise.
+ */
 bool ser2net_control_start(const struct ser2net_control_context *ctx)
 {
     /* Launch the control port task (no-op if already running). */
@@ -1131,6 +1239,7 @@ bool ser2net_control_start(const struct ser2net_control_context *ctx)
     } else {
         xQueueReset(monitor_queue);
     }
+    ser2net_monitor_register_sink(control_monitor_sink, NULL);
 #endif
     control_running = true;
     if (xTaskCreate(control_task, "ser2net_ctrl",
@@ -1138,11 +1247,17 @@ bool ser2net_control_start(const struct ser2net_control_context *ctx)
                     &control_task_handle) != pdPASS) {
         control_running = false;
         control_task_handle = NULL;
+#if ENABLE_MONITORING
+        ser2net_monitor_unregister_sink(control_monitor_sink, NULL);
+#endif
         return false;
     }
     return true;
 }
 
+/**
+ * @brief Stop the control port task and tear down the listener socket.
+ */
 void ser2net_control_stop(void)
 {
     /* Stop task and close listener (idempotent). */
@@ -1163,50 +1278,6 @@ void ser2net_control_stop(void)
         vQueueDelete(monitor_queue);
         monitor_queue = NULL;
     }
+    ser2net_monitor_unregister_sink(control_monitor_sink, NULL);
 #endif
 }
-
-#if ENABLE_MONITORING
-void ser2net_control_monitor_feed(uint16_t tcp_port,
-                                  enum ser2net_monitor_stream stream,
-                                  const uint8_t *data,
-                                  size_t len)
-{
-    if (!control_running || !monitor_queue || !data || len == 0)
-        return;
-
-    enum monitor_type type = monitor_state.type;
-    if (type == MONITOR_NONE)
-        return;
-    if (monitor_state.tcp_port != tcp_port)
-        return;
-    if ((type == MONITOR_TCP && stream != SER2NET_MONITOR_STREAM_TCP) ||
-        (type == MONITOR_TERM && stream != SER2NET_MONITOR_STREAM_TERM))
-        return;
-
-    while (len > 0) {
-        size_t chunk = len > MONITOR_CHUNK ? MONITOR_CHUNK : len;
-        struct monitor_message msg = {
-            .stream = stream,
-            .tcp_port = tcp_port,
-            .len = chunk
-        };
-        memcpy(msg.data, data, chunk);
-        if (xQueueSend(monitor_queue, &msg, 0) != pdPASS)
-            break;
-        data += chunk;
-        len -= chunk;
-    }
-}
-#else
-void ser2net_control_monitor_feed(uint16_t tcp_port,
-                                  enum ser2net_monitor_stream stream,
-                                  const uint8_t *data,
-                                  size_t len)
-{
-    (void) tcp_port;
-    (void) stream;
-    (void) data;
-    (void) len;
-}
-#endif

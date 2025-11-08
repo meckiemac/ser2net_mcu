@@ -46,6 +46,9 @@
 
 static char json_error_msg[128];
 
+/**
+ * @brief Store a formatted parser error string for later retrieval.
+ */
 static void
 set_json_error(const char *fmt, ...)
 {
@@ -55,12 +58,20 @@ set_json_error(const char *fmt, ...)
     va_end(ap);
 }
 
+/**
+ * @brief Return the last human-readable parser error (if any).
+ *
+ * @return Pointer to static buffer or NULL when no error was recorded.
+ */
 const char *
 ser2net_json_last_error(void)
 {
     return json_error_msg[0] ? json_error_msg : NULL;
 }
 
+/**
+ * @brief Apply `sessions` JSON overrides (worker count, stack, priority).
+ */
 static BaseType_t
 parse_sessions(const cJSON *obj, struct ser2net_runtime_config *cfg)
 {
@@ -97,6 +108,9 @@ parse_sessions(const cJSON *obj, struct ser2net_runtime_config *cfg)
     return pdPASS;
 }
 
+/**
+ * @brief Apply `buffers` JSON overrides for TCP/UART sizes.
+ */
 static BaseType_t
 parse_buffers(const cJSON *obj, struct ser2net_basic_session_cfg *cfg)
 {
@@ -124,6 +138,9 @@ parse_buffers(const cJSON *obj, struct ser2net_basic_session_cfg *cfg)
     return pdPASS;
 }
 
+/**
+ * @brief Parse strings such as \"UART1\" into integer UART numbers.
+ */
 static int
 parse_uart_string(const char *str)
 {
@@ -142,6 +159,9 @@ parse_uart_string(const char *str)
     return atoi(tmp);
 }
 
+/**
+ * @brief Translate one `serial[]` JSON object into adapter/runtime metadata.
+ */
 static BaseType_t
 parse_serial_item(const cJSON *item,
                   struct ser2net_esp32_serial_port_cfg *port,
@@ -328,6 +348,17 @@ parse_serial_item(const cJSON *item,
     return pdPASS;
 }
 
+/**
+ * @brief Parse the ESP32 JSON configuration blob into runtime/app structures.
+ *
+ * @param json Null-terminated JSON string.
+ * @param app_cfg Destination for high-level runtime/session config.
+ * @param net_cfg Scratch space for a single listener template.
+ * @param serial_cfg Destination describing all UART ports.
+ * @param ports Backing array referenced by @p serial_cfg.
+ * @param max_ports Capacity of the @p ports array.
+ * @return `pdPASS` on success, `pdFAIL` plus ::ser2net_json_last_error() otherwise.
+ */
 BaseType_t
 ser2net_load_config_json_esp32(const char *json,
         struct ser2net_app_config *app_cfg,
@@ -502,6 +533,7 @@ ser2net_load_config_json_esp32(const char *json,
     return pdFAIL;
 }
 
+/** Return the last parser error (helper for logging/UI). */
 const char *
 ser2net_json_last_error(void)
 {

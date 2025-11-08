@@ -115,6 +115,12 @@ static struct ser2net_basic_session_state g_session_state;
 static const char *SESSION_LOG_TAG = "ser2net_session";
 static SemaphoreHandle_t g_session_lock;
 
+/**
+ * @brief Locate the metadata index for a given logical port id.
+ *
+ * @param port_id Logical identifier assigned to the listener/UART pair.
+ * @return Zero-based index inside ::g_session_state or -1 if not found.
+ */
 static int
 find_port_index(int port_id)
 {
@@ -131,6 +137,16 @@ struct session_init_param {
     int port_id;
 };
 
+/**
+ * @brief Send the entire buffer to a TCP client, retrying short writes.
+ *
+ * @param net_if Network adapter used for transmission.
+ * @param client Client handle.
+ * @param buf Payload buffer.
+ * @param len Payload length.
+ * @param timeout_ticks Optional timeout window.
+ * @return `pdPASS` when the full buffer was transmitted.
+ */
 static BaseType_t
 net_write_all(const struct ser2net_network_if *net_if,
               ser2net_client_handle_t client,
@@ -162,6 +178,13 @@ net_write_all(const struct ser2net_network_if *net_if,
     return (written == len) ? pdPASS : pdFAIL;
 }
 
+/**
+ * @brief Emit a TELNET WILL/WONT/DO/DONT sequence.
+ *
+ * @param ctx Session context.
+ * @param cmd TELNET verb (WILL/WONT/DO/DONT).
+ * @param opt Option value.
+ */
 static BaseType_t
 send_telnet_cmd(struct ser2net_session_ctx *ctx, uint8_t cmd, uint8_t opt)
 {
@@ -169,6 +192,12 @@ send_telnet_cmd(struct ser2net_session_ctx *ctx, uint8_t cmd, uint8_t opt)
     return net_write_all(ctx->network_if, ctx->client, buf, sizeof(buf), pdMS_TO_TICKS(200));
 }
 
+/**
+ * @brief Wrap raw RFC2217 payload into TELNET subnegotiation framing.
+ *
+ * Handles IAC escaping as mandated by the TELNET specification before
+ * forwarding the payload to the network.
+ */
 static BaseType_t
 send_telnet_subneg(struct ser2net_session_ctx *ctx,
                    const uint8_t *data, size_t len)
@@ -193,6 +222,9 @@ send_telnet_subneg(struct ser2net_session_ctx *ctx,
     return net_write_all(ctx->network_if, ctx->client, trailer, sizeof(trailer), pdMS_TO_TICKS(200));
 }
 
+/**
+ * @brief Reset the session's working UART parameters to the configured defaults.
+ */
 static void
 session_reset_defaults(struct ser2net_session_ctx *ctx)
 {
@@ -216,6 +248,9 @@ session_reset_defaults(struct ser2net_session_ctx *ctx)
     ctx->current_flowcontrol = params.flow_control;
 }
 
+/**
+ * @brief Push the session's cached serial settings down to the adapter.
+ */
 static BaseType_t
 apply_serial_settings(struct ser2net_session_ctx *ctx)
 {
@@ -249,6 +284,14 @@ apply_serial_settings(struct ser2net_session_ctx *ctx)
     return rv;
 }
 
+/**
+ * @brief Decode RFC2217 sub-negotiation payloads and adjust the UART.
+ *
+ * @param ctx Session context receiving the command.
+ * @param data Pointer to the RFC2217 payload (first byte is the command id).
+ * @param len Length of @p data.
+ * @return `pdPASS` when the command was handled successfully.
+ */
 static BaseType_t
 handle_rfc2217_command(struct ser2net_session_ctx *ctx,
                        const uint8_t *data, size_t len)
@@ -398,6 +441,12 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
     return pdPASS;
 }
 
+/**
+ * @brief Consume TELNET framed data from the TCP socket and forward payload.
+ *
+ * Parses TELNET commands, handles RFC2217 sub-negotiations, and writes raw bytes
+ * to the UART once escaping has been removed.
+ */
 static BaseType_t
 process_network_data_telnet(struct ser2net_session_ctx *ctx,
                             uint8_t *buf, size_t len)
@@ -554,10 +603,10 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
 
         if (serial_pos == sizeof(serial_chunk)) {
             if (ctx->tcp_port)
-                ser2net_control_monitor_feed(ctx->tcp_port,
-                                             SER2NET_MONITOR_STREAM_TCP,
-                                             serial_chunk,
-                                             serial_pos);
+                ser2net_monitor_feed(ctx->tcp_port,
+                                     SER2NET_MONITOR_STREAM_TCP,
+                                     serial_chunk,
+                                     serial_pos);
             if (!g_session_state.serial->serial_write ||
                 g_session_state.serial->serial_write(
                     g_session_state.serial->ctx, ctx->serial,
@@ -569,10 +618,10 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
 
     if (serial_pos > 0) {
         if (ctx->tcp_port)
-            ser2net_control_monitor_feed(ctx->tcp_port,
-                                         SER2NET_MONITOR_STREAM_TCP,
-                                         serial_chunk,
-                                         serial_pos);
+            ser2net_monitor_feed(ctx->tcp_port,
+                                 SER2NET_MONITOR_STREAM_TCP,
+                                 serial_chunk,
+                                 serial_pos);
         if (!g_session_state.serial->serial_write ||
             g_session_state.serial->serial_write(
                 g_session_state.serial->ctx, ctx->serial,
@@ -583,6 +632,12 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
     return pdPASS;
 }
 
+/**
+ * @brief Drain UART bytes and forward them to the TCP client.
+ *
+ * Escapes TELNET IAC bytes when running in framed mode and mirrors the data on
+ * the monitor bus for debugging.
+ */
 static BaseType_t
 flush_serial_to_net(struct ser2net_session_ctx *ctx)
 {
@@ -605,10 +660,10 @@ flush_serial_to_net(struct ser2net_session_ctx *ctx)
         return pdPASS;
 
     if (ctx->tcp_port)
-        ser2net_control_monitor_feed(ctx->tcp_port,
-                                     SER2NET_MONITOR_STREAM_TERM,
-                                     ctx->serial_buf,
-                                     (size_t) rv);
+        ser2net_monitor_feed(ctx->tcp_port,
+                             SER2NET_MONITOR_STREAM_TERM,
+                             ctx->serial_buf,
+                             (size_t) rv);
 
     if (ctx->mode != SER2NET_PORT_MODE_TELNET) {
         return net_write_all(ctx->network_if, ctx->client,
@@ -627,6 +682,12 @@ flush_serial_to_net(struct ser2net_session_ctx *ctx)
                          ctx->net_buf, out_len, pdMS_TO_TICKS(50));
 }
 
+/**
+ * @brief Default ::ser2net_session_ops initialiser.
+ *
+ * Allocates per-session buffers, copies defaults, primes TELNET negotiation,
+ * and keeps bookkeeping counters in sync.
+ */
 static BaseType_t
 basic_initialise(void *ctx, ser2net_client_handle_t client,
                  ser2net_serial_handle_t serial)
@@ -686,6 +747,14 @@ basic_initialise(void *ctx, ser2net_client_handle_t client,
     return pdPASS;
 }
 
+/**
+ * @brief Pump data between TCP and UART until teardown is requested.
+ *
+ * @param ctx Pointer to the stored ::ser2net_session_ctx pointer.
+ * @param client TCP handle (unused, kept for completeness).
+ * @param serial Serial handle (unused, the context already stores it).
+ * @param block_ticks Maximum time to wait for network activity.
+ */
 static BaseType_t
 basic_process_io(void *ctx, ser2net_client_handle_t client,
                  ser2net_serial_handle_t serial, TickType_t block_ticks)
@@ -717,10 +786,10 @@ basic_process_io(void *ctx, ser2net_client_handle_t client,
                     return pdFAIL;
             } else {
                 if (sctx->tcp_port)
-                    ser2net_control_monitor_feed(sctx->tcp_port,
-                                                 SER2NET_MONITOR_STREAM_TCP,
-                                                 sctx->net_buf,
-                                                 (size_t) rv);
+                    ser2net_monitor_feed(sctx->tcp_port,
+                                         SER2NET_MONITOR_STREAM_TCP,
+                                         sctx->net_buf,
+                                         (size_t) rv);
                 if (!g_session_state.serial->serial_write)
                     return pdFAIL;
                 size_t remaining = (size_t) rv;
@@ -746,6 +815,9 @@ basic_process_io(void *ctx, ser2net_client_handle_t client,
     return pdPASS;
 }
 
+/**
+ * @brief Release buffers and decrement counters once a session ends.
+ */
 static void
 basic_handle_disconnect(void *ctx, ser2net_client_handle_t client,
                         ser2net_serial_handle_t serial)
@@ -779,6 +851,13 @@ static const struct ser2net_session_ops g_basic_session_ops = {
     .handle_disconnect = basic_handle_disconnect
 };
 
+/**
+ * @brief Return the default RFC2217 session ops implementation.
+ *
+ * @param network Network adapter (unused, kept for compatibility).
+ * @param serial Serial adapter used for IO callbacks.
+ * @param cfg Optional buffer + port metadata configuration.
+ */
 const struct ser2net_session_ops *
 ser2net_basic_session_ops_init(const struct ser2net_network_if *network,
                                const struct ser2net_serial_if *serial,
@@ -822,6 +901,11 @@ ser2net_basic_session_ops_init(const struct ser2net_network_if *network,
     return &g_basic_session_ops;
 }
 
+/**
+ * @brief Round-robin helper used by test scaffolding to cycle port ids.
+ *
+ * @return Next port id from the stored list.
+ */
 int
 ser2net_basic_next_port(void)
 {
@@ -831,6 +915,14 @@ ser2net_basic_next_port(void)
     return g_session_state.port_ids[idx];
 }
 
+/**
+ * @brief Copy the currently known port IDs and active session counters.
+ *
+ * @param port_ids Optional destination buffer for port IDs.
+ * @param active_sessions Optional destination for session counters.
+ * @param max_entries Capacity of the caller-provided buffers.
+ * @return Number of entries written.
+ */
 size_t
 ser2net_get_port_stats(int *port_ids, int *active_sessions, size_t max_entries)
 {
@@ -846,6 +938,13 @@ ser2net_get_port_stats(int *port_ids, int *active_sessions, size_t max_entries)
     return count;
 }
 
+/**
+ * @brief Update the stored defaults for a listener (and optionally live sessions).
+ *
+ * @param port_id Logical port identifier.
+ * @param params New UART defaults.
+ * @param idle_timeout_ms Updated idle timeout.
+ */
 BaseType_t
 ser2net_session_update_defaults(int port_id,
                                 const struct ser2net_serial_params *params,
@@ -870,6 +969,12 @@ ser2net_session_update_defaults(int port_id,
     return pdPASS;
 }
 
+/**
+ * @brief Apply a config change to a specific live session context.
+ *
+ * @param session_ctx Session pointer returned by ::ser2net_session_ops.initialise().
+ * @param params Serial parameters to enforce immediately.
+ */
 BaseType_t
 ser2net_session_apply_config(void *session_ctx,
                              const struct ser2net_serial_params *params)
@@ -887,6 +992,12 @@ ser2net_session_apply_config(void *session_ctx,
     return apply_serial_settings(ctx);
 }
 
+/**
+ * @brief Change the framed mode (telnet/raw/rawlp) for a listener.
+ *
+ * @param port_id Target listener.
+ * @param mode Desired ::ser2net_port_mode.
+ */
 BaseType_t
 ser2net_session_set_mode(int port_id, enum ser2net_port_mode mode)
 {
@@ -908,6 +1019,15 @@ ser2net_session_set_mode(int port_id, enum ser2net_port_mode mode)
     return pdPASS;
 }
 
+/**
+ * @brief Register metadata so future sessions inherit the supplied defaults.
+ *
+ * @param port_id Logical identifier.
+ * @param tcp_port TCP listener port.
+ * @param mode Framing mode.
+ * @param defaults Serial defaults that should be applied.
+ * @param idle_timeout_ms Idle timeout for the session.
+ */
 BaseType_t
 ser2net_session_register_port(int port_id,
                               uint16_t tcp_port,
@@ -950,6 +1070,11 @@ ser2net_session_register_port(int port_id,
     return pdPASS;
 }
 
+/**
+ * @brief Remove port metadata that was previously registered.
+ *
+ * @param port_id Logical identifier to remove.
+ */
 BaseType_t
 ser2net_session_unregister_port(int port_id)
 {
