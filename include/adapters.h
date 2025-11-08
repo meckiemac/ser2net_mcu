@@ -34,12 +34,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "runtime.h"
+#include "ser2net_platform.h"
+#include "ser2net_if.h"
 #include "session_ops.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#if SER2NET_TARGET == SER2NET_PLATFORM_ESP32
 
 /* --------- ESP-IDF networking --------- */
 
@@ -98,6 +101,71 @@ BaseType_t ser2net_esp32_register_port(const struct ser2net_esp32_serial_port_cf
 /** @brief Remove a previously registered port. */
 void ser2net_esp32_unregister_port(int port_id);
 
+#endif /* SER2NET_PLATFORM_ESP32 */
+
+#if SER2NET_TARGET == SER2NET_PLATFORM_STM32
+
+struct ser2net_stm32_network_cfg {
+    uint16_t listen_port;
+    int backlog;
+};
+
+const struct ser2net_network_if *
+ser2net_stm32_get_network_if(const struct ser2net_stm32_network_cfg *cfg);
+void ser2net_stm32_release_network_if(const struct ser2net_network_if *iface);
+
+struct ser2net_stm32_serial_port_cfg {
+    int port_id;
+    uint8_t instance;
+    uint16_t gpio_tx;
+    uint16_t gpio_rx;
+    uint32_t baud_rate;
+    uint16_t tcp_port;
+    int tcp_backlog;
+    enum ser2net_port_mode mode;
+    uint32_t idle_timeout_ms;
+    bool enabled;
+};
+
+const struct ser2net_serial_if *
+ser2net_stm32_get_serial_if(const struct ser2net_stm32_serial_port_cfg *cfg,
+                            size_t num_ports);
+BaseType_t ser2net_stm32_register_port(const struct ser2net_stm32_serial_port_cfg *cfg);
+void ser2net_stm32_unregister_port(int port_id);
+
+#endif /* SER2NET_PLATFORM_STM32 */
+
+#if SER2NET_TARGET == SER2NET_PLATFORM_RP2040
+
+struct ser2net_rp2040_network_cfg {
+    uint16_t listen_port;
+    int backlog;
+};
+
+const struct ser2net_network_if *
+ser2net_rp2040_get_network_if(const struct ser2net_rp2040_network_cfg *cfg);
+void ser2net_rp2040_release_network_if(const struct ser2net_network_if *iface);
+
+struct ser2net_rp2040_serial_port_cfg {
+    int port_id;
+    uint8_t uart_index;
+    uint8_t tx_pin;
+    uint8_t rx_pin;
+    uint32_t baud_rate;
+    uint16_t tcp_port;
+    int tcp_backlog;
+    enum ser2net_port_mode mode;
+    uint32_t idle_timeout_ms;
+    bool enabled;
+};
+
+const struct ser2net_serial_if *
+ser2net_rp2040_get_serial_if(const struct ser2net_rp2040_serial_port_cfg *cfg,
+                             size_t num_ports);
+BaseType_t ser2net_rp2040_register_port(const struct ser2net_rp2040_serial_port_cfg *cfg);
+void ser2net_rp2040_unregister_port(int port_id);
+
+#endif /* SER2NET_PLATFORM_RP2040 */
 
 #ifdef __cplusplus
 }

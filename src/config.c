@@ -54,12 +54,13 @@ ser2net_runtime_config_init(struct ser2net_runtime_config *cfg)
     cfg->session_task_priority = tskIDLE_PRIORITY + 1;
     cfg->session_task_stack_words = 4096;
     cfg->max_sessions = 4;
-    cfg->accept_poll_ticks = pdMS_TO_TICKS(200);
-    cfg->session_block_ticks = pdMS_TO_TICKS(20);
+    cfg->accept_poll_ticks = SER2NET_OS_MS_TO_TICKS(200);
+    cfg->session_block_ticks = SER2NET_OS_MS_TO_TICKS(20);
     cfg->listener_count = 0;
     memset(cfg->listeners, 0, sizeof(cfg->listeners));
     cfg->control_enabled = false;
     memset(&cfg->control_ctx, 0, sizeof(cfg->control_ctx));
+    cfg->persist_ops = NULL;
     cfg->config_changed_cb = NULL;
     cfg->config_changed_ctx = NULL;
 }

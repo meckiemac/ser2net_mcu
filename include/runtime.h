@@ -36,13 +36,11 @@
 #include <stddef.h>
 
 #include "ser2net_opts.h"
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/timers.h"
+#include "ser2net_os.h"
 
 #include "control_port.h"
+#include "ser2net_persist.h"
+#include "ser2net_if.h"
 
 #ifndef SER2NET_MAX_PORTS
 #define SER2NET_MAX_PORTS 8
@@ -52,64 +50,9 @@
 extern "C" {
 #endif
 
-/* Represents an opaque handle for a network listener (server socket). */
-typedef void *ser2net_listener_handle_t;
-
-/* Represents an opaque handle for an accepted client connection. */
-typedef void *ser2net_client_handle_t;
-
-/* Represents an opaque handle for a serial device. */
-typedef void *ser2net_serial_handle_t;
-
-/**
- * @brief Call-backs required for a network backend.
- */
-struct ser2net_network_if {
-    void *ctx;
-    /** Create and start a listener. */
-    BaseType_t (*open_listener)(void *ctx, ser2net_listener_handle_t *out_listener);
-    /** Accept a pending client connection. */
-    BaseType_t (*accept_client)(void *ctx, ser2net_listener_handle_t listener,
-                                ser2net_client_handle_t *out_client, TickType_t timeout_ticks);
-    /** Close a client connection immediately. */
-    void (*close_client)(void *ctx, ser2net_client_handle_t client);
-    /** Receive data from a client. */
-    int (*client_recv)(void *ctx, ser2net_client_handle_t client,
-                       void *buf, size_t len, TickType_t timeout_ticks);
-    /** Send data to a client. */
-    int (*client_send)(void *ctx, ser2net_client_handle_t client,
-                       const void *buf, size_t len, TickType_t timeout_ticks);
-    /** Shutdown the client connection gracefully. */
-    void (*client_shutdown)(void *ctx, ser2net_client_handle_t client);
-};
-
-/**
- * @brief Call-backs required for a serial backend.
- */
-struct ser2net_serial_if {
-    void *ctx;
-    BaseType_t (*open_serial)(void *ctx, int port_id, ser2net_serial_handle_t *out_serial);
-    void (*close_serial)(void *ctx, ser2net_serial_handle_t serial);
-    int (*serial_read)(void *ctx, ser2net_serial_handle_t serial,
-                       void *buf, size_t len, TickType_t timeout_ticks);
-    int (*serial_write)(void *ctx, ser2net_serial_handle_t serial,
-                        const void *buf, size_t len);
-    BaseType_t (*serial_configure)(void *ctx, ser2net_serial_handle_t serial,
-                                   int baud, int data_bits, int parity,
-                                   int stop_bits, int flow_control);
-};
-
-struct ser2net_session_ops {
-    void *ctx;
-    BaseType_t (*initialise)(void *ctx, ser2net_client_handle_t client,
-                             ser2net_serial_handle_t serial);
-    BaseType_t (*process_io)(void *ctx, ser2net_client_handle_t client,
-                             ser2net_serial_handle_t serial, TickType_t block_ticks);
-    void (*handle_disconnect)(void *ctx, ser2net_client_handle_t client,
-                              ser2net_serial_handle_t serial);
-};
-
 enum ser2net_port_mode;
+
+struct ser2net_session_ops;
 
 struct ser2net_runtime_listener_cfg {
     int port_id;
@@ -130,8 +73,8 @@ struct ser2net_runtime_config {
     uint16_t session_task_stack_words;
 
     size_t max_sessions;
-    TickType_t accept_poll_ticks;
-    TickType_t session_block_ticks;
+    ser2net_tick_t accept_poll_ticks;
+    ser2net_tick_t session_block_ticks;
 
     const struct ser2net_network_if *network;
     const struct ser2net_serial_if *serial;
@@ -140,6 +83,7 @@ struct ser2net_runtime_config {
     struct ser2net_runtime_listener_cfg listeners[SER2NET_MAX_PORTS];
     bool control_enabled;
     struct ser2net_control_context control_ctx;
+    const struct ser2net_persist_ops *persist_ops;
     void (*config_changed_cb)(void *user_ctx);
     void *config_changed_ctx;
 };

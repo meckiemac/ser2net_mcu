@@ -30,8 +30,9 @@
 #include <stdint.h>
 
 #include "ser2net_opts.h"
-
-#include "runtime.h"
+#include "ser2net_if.h"
+#include "monitor_bus.h"
+#include "ser2net_os.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,6 +74,20 @@ struct ser2net_basic_session_cfg {
     enum ser2net_port_mode port_modes[SER2NET_MAX_PORTS];
     uint32_t idle_timeout_ms[SER2NET_MAX_PORTS];
     struct ser2net_serial_params port_params[SER2NET_MAX_PORTS];
+};
+
+struct ser2net_session_ops {
+    void *ctx;
+    ser2net_os_status_t (*initialise)(void *ctx,
+                                      ser2net_client_handle_t client,
+                                      ser2net_serial_handle_t serial);
+    ser2net_os_status_t (*process_io)(void *ctx,
+                                      ser2net_client_handle_t client,
+                                      ser2net_serial_handle_t serial,
+                                      ser2net_tick_t block_ticks);
+    void (*handle_disconnect)(void *ctx,
+                              ser2net_client_handle_t client,
+                              ser2net_serial_handle_t serial);
 };
 
 const struct ser2net_session_ops *

@@ -40,7 +40,7 @@
 #include <stdio.h>
 
 #include "cJSON.h"
-#include "esp_log.h"
+#include "ser2net_log.h"
 #include "control_port.h"
 #include "session_ops.h"
 

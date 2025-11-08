@@ -42,9 +42,7 @@
 #include <ctype.h>
 #include <limits.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
+#include "ser2net_os.h"
 #include "driver/uart.h"
 
 #include <sys/socket.h>
@@ -59,7 +57,7 @@
 #define DEFAULT_VERSION "ser2net-mcu"
 
 static struct ser2net_control_context control_context;
-static TaskHandle_t control_task_handle = NULL;
+static ser2net_task_handle_t control_task_handle = NULL;
 static int control_listen_fd = -1;
 static bool control_running = false;
 
@@ -74,7 +72,7 @@ struct monitor_message {
     uint8_t data[MONITOR_CHUNK];
 };
 
-static QueueHandle_t monitor_queue = NULL;
+static ser2net_queue_t monitor_queue = NULL;
 
 enum monitor_type {
     MONITOR_NONE = 0,
@@ -119,7 +117,7 @@ static void control_monitor_sink(void *ctx,
             .len = chunk
         };
         memcpy(msg.data, data, chunk);
-        if (xQueueSend(monitor_queue, &msg, 0) != pdPASS)
+        if (ser2net_os_queue_send(monitor_queue, &msg, 0) != pdPASS)
             break;
         data += chunk;
         len -= chunk;
@@ -274,7 +272,7 @@ static void flush_monitor_queue(int fd)
         return;
 
     struct monitor_message msg;
-    while (xQueueReceive(monitor_queue, &msg, 0) == pdPASS) {
+    while (ser2net_os_queue_receive(monitor_queue, &msg, 0) == pdPASS) {
         if (monitor_state.type == MONITOR_NONE)
             continue;
         if (monitor_state.tcp_port != msg.tcp_port)
@@ -357,7 +355,7 @@ static bool handle_command_line(int fd, char *line)
             monitor_state.type = MONITOR_NONE;
             monitor_state.tcp_port = 0;
             if (monitor_queue)
-                xQueueReset(monitor_queue);
+                ser2net_os_queue_reset(monitor_queue);
         } else {
             char *port_spec = strtok_r(NULL, " \t", &saveptr);
             if (!port_spec) {
@@ -372,7 +370,7 @@ static bool handle_command_line(int fd, char *line)
                     send_line(fd, "Already monitoring a port (use 'monitor stop' first).");
                 } else {
                     if (monitor_queue)
-                        xQueueReset(monitor_queue);
+                        ser2net_os_queue_reset(monitor_queue);
                     monitor_state.type = strcasecmp(type, "tcp") == 0 ? MONITOR_TCP : MONITOR_TERM;
                     monitor_state.tcp_port = cfg->tcp_port;
                 }
@@ -1132,7 +1130,7 @@ static void serve_client(int client_fd)
             break; /* remote closed */
 
         if (errno == EWOULDBLOCK || errno == EAGAIN) {
-            vTaskDelay(pdMS_TO_TICKS(20));
+            ser2net_os_task_delay_ticks(SER2NET_OS_MS_TO_TICKS(20));
             continue;
         }
         if (errno == EINTR)
@@ -1145,7 +1143,7 @@ static void serve_client(int client_fd)
     monitor_state.type = MONITOR_NONE;
     monitor_state.tcp_port = 0;
     if (monitor_queue)
-        xQueueReset(monitor_queue);
+        ser2net_os_queue_reset(monitor_queue);
 }
 
 /**
@@ -1165,7 +1163,7 @@ static void control_task(void *arg)
     int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (listen_fd < 0) {
         control_running = false;
-        vTaskDelete(NULL);
+        ser2net_os_task_delete(NULL);
         return;
     }
     int yes = 1;
@@ -1174,14 +1172,14 @@ static void control_task(void *arg)
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(listen_fd);
         control_running = false;
-        vTaskDelete(NULL);
+        ser2net_os_task_delete(NULL);
         return;
     }
     int backlog = control_context.backlog <= 0 ? 2 : control_context.backlog;
     if (listen(listen_fd, backlog) < 0) {
         close(listen_fd);
         control_running = false;
-        vTaskDelete(NULL);
+        ser2net_os_task_delete(NULL);
         return;
     }
 
@@ -1193,7 +1191,7 @@ static void control_task(void *arg)
         if (client_fd < 0) {
             if (!control_running)
                 break;
-            vTaskDelay(pdMS_TO_TICKS(50));
+            ser2net_os_task_delay_ticks(SER2NET_OS_MS_TO_TICKS(50));
             continue;
         }
         serve_client(client_fd);
@@ -1207,7 +1205,7 @@ static void control_task(void *arg)
     control_listen_fd = -1;
     control_task_handle = NULL;
     control_running = false;
-    vTaskDelete(NULL);
+    ser2net_os_task_delete(NULL);
 }
 
 /**
@@ -1233,16 +1231,16 @@ bool ser2net_control_start(const struct ser2net_control_context *ctx)
     monitor_state.type = MONITOR_NONE;
     monitor_state.tcp_port = 0;
     if (!monitor_queue) {
-        monitor_queue = xQueueCreate(MONITOR_QUEUE_DEPTH, sizeof(struct monitor_message));
+        monitor_queue = ser2net_os_queue_create(MONITOR_QUEUE_DEPTH, sizeof(struct monitor_message));
         if (!monitor_queue)
             return false;
     } else {
-        xQueueReset(monitor_queue);
+        ser2net_os_queue_reset(monitor_queue);
     }
     ser2net_monitor_register_sink(control_monitor_sink, NULL);
 #endif
     control_running = true;
-    if (xTaskCreate(control_task, "ser2net_ctrl",
+    if (ser2net_os_task_create(control_task, "ser2net_ctrl",
                     4096, NULL, tskIDLE_PRIORITY + 1,
                     &control_task_handle) != pdPASS) {
         control_running = false;
@@ -1268,7 +1266,7 @@ void ser2net_control_stop(void)
         control_listen_fd = -1;
     }
     if (control_task_handle) {
-        vTaskDelete(control_task_handle);
+        ser2net_os_task_delete(control_task_handle);
         control_task_handle = NULL;
     }
 #if ENABLE_MONITORING

@@ -132,6 +132,74 @@ sequenceDiagram
 - Moves TLS PEM blobs (MQTT certs/keys) to the heap instead of the stack.
 - Offers simple slot-based setters/getters so other modules can share material.
 
+## Portability hooks
+
+### Logging abstraction
+
+The runtime no longer depends on ESP-IDF's `ESP_LOG*` macros directly.  All
+logging goes through `lib/ser2net_mcu/include/ser2net_log.h`, which defines the
+`SER2NET_LOGI/W/E` and `SER2NET_LOG_BUFFER_HEXDUMP` helpers.  Platform projects
+can map those macros to their preferred backend, e.g.:
+
+```c
+#define SER2NET_USE_ESP_LOG 1
+#include "ser2net_log.h"
+```
+
+When `SER2NET_USE_ESP_LOG` is not defined the library falls back to a tiny
+`printf`-based shim so bare-bones targets or unit tests still get readable logs.
+
+### OS shim
+
+`lib/ser2net_mcu/include/ser2net_os.h` collects all task/queue/mutex/TLS calls
+behind a single header.  The current implementation targets ESP-IDF's FreeRTOS
+port, but other MCUs only need to provide equivalent wrappers for memory
+allocation, task creation, delays, queues, critical sections, and (optionally)
+thread-local storage.  The runtime/session/control code now consumes those
+helpers exclusively, so platform-specific FreeRTOS headers stay confined to the
+shim.
+
+### Persistence callbacks
+
+Dynamic builds typically allow the user to add/remove ports, tweak UART
+parameters, or move the control port at runtime.  The core library does not
+know how to write those changes back to flash or EEPROM, so
+`ser2net_runtime_config` now accepts an optional
+`struct ser2net_persist_ops` bundle:
+
+```c
+static BaseType_t save_ports(void *ctx,
+                             const struct ser2net_esp32_serial_port_cfg *ports,
+                             size_t count)
+{
+    return platform_write_ports_to_flash(ports, count) ? pdPASS : pdFAIL;
+}
+
+static const struct ser2net_persist_ops persist_ops = {
+    .ctx = NULL,
+    .load_ports = load_ports,
+    .save_ports = save_ports,
+    .load_control = load_control,
+    .save_control = save_control
+};
+
+app_cfg.runtime_cfg.persist_ops = &persist_ops;
+```
+
+The runtime automatically calls `save_ports` / `save_control` whenever the
+topology changes (control shell, REST API, Web UI, MQTT commands).  Loading is
+optional and can be fed back into whatever config source the platform uses
+(JSON, Kconfig, etc.) before calling `ser2net_start()`.  This keeps the library
+flash-agnostic while still providing a consistent contract for MCU ports.
+
+### Platform adapters
+
+`ser2net_platform.h` selects the active platform (`SER2NET_TARGET`).  The
+default is ESP32, which builds the implementations in
+`src/platform/esp32/`.  Skeletons for STM32 and RP2040 live under their
+respective directories so future ports only need to fill in the
+`ser2net_network_if`/`ser2net_serial_if` factories.
+
 ## Build-time feature flags
 
 The header `lib/ser2net_mcu/include/ser2net_opts.h` centralises compile-time

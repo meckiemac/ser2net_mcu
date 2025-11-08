@@ -21,12 +21,11 @@
 #include "runtime.h"
 #include "session_ops.h"
 #include "adapters.h"
-#include "esp_log.h"
+#include "ser2net_log.h"
 
 #include <string.h>
 #include <limits.h>
 
-#include "freertos/semphr.h"
 #include "driver/uart.h"
 #include <sys/types.h>
 
@@ -62,8 +61,8 @@ struct active_session_entry {
 
 struct ser2net_runtime_state {
     struct ser2net_runtime_config cfg;
-    QueueHandle_t job_queue;
-    TaskHandle_t listener_task;
+    ser2net_queue_t job_queue;
+    ser2net_task_handle_t listener_task;
     struct listener_entry listeners[SER2NET_MAX_PORTS];
     size_t listener_count;
     struct ser2net_esp32_serial_port_cfg port_table[SER2NET_MAX_PORTS];
@@ -71,11 +70,12 @@ struct ser2net_runtime_state {
     bool control_started;
     struct active_session_entry *sessions;
     size_t session_capacity;
-    SemaphoreHandle_t active_lock;
-    SemaphoreHandle_t port_lock;
+    ser2net_mutex_t active_lock;
+    ser2net_mutex_t port_lock;
 };
 
 static struct ser2net_runtime_state runtime_state;
+static void runtime_persist_snapshot(void);
 
 struct session_job {
     int port_id;
@@ -122,6 +122,25 @@ runtime_notify_config_changed(void)
 {
     if (runtime_state.cfg.config_changed_cb)
         runtime_state.cfg.config_changed_cb(runtime_state.cfg.config_changed_ctx);
+    runtime_persist_snapshot();
+}
+
+static void
+runtime_persist_snapshot(void)
+{
+    const struct ser2net_persist_ops *persist = runtime_state.cfg.persist_ops;
+    if (!persist)
+        return;
+
+    if (persist->save_ports)
+        persist->save_ports(persist->ctx,
+                            runtime_state.port_table,
+                            runtime_state.port_count);
+
+    if (persist->save_control && runtime_state.cfg.control_enabled)
+        persist->save_control(persist->ctx,
+                              runtime_state.cfg.control_ctx.tcp_port,
+                              runtime_state.cfg.control_ctx.backlog);
 }
 
 /**
@@ -157,7 +176,7 @@ active_sessions_register(uint16_t tcp_port,
     if (!runtime_state.sessions || !runtime_state.active_lock)
         return false;
 
-    if (xSemaphoreTake(runtime_state.active_lock, portMAX_DELAY) != pdPASS)
+    if (ser2net_os_mutex_lock(runtime_state.active_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return false;
 
     bool stored = false;
@@ -175,7 +194,7 @@ active_sessions_register(uint16_t tcp_port,
         break;
     }
 
-    xSemaphoreGive(runtime_state.active_lock);
+    ser2net_os_mutex_unlock(runtime_state.active_lock);
     return stored;
 }
 
@@ -191,7 +210,7 @@ active_sessions_unregister(uint16_t tcp_port, ser2net_client_handle_t client)
     if (!runtime_state.sessions || !runtime_state.active_lock)
         return;
 
-    if (xSemaphoreTake(runtime_state.active_lock, portMAX_DELAY) != pdPASS)
+    if (ser2net_os_mutex_lock(runtime_state.active_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return;
 
     for (size_t i = 0; i < runtime_state.session_capacity; ++i) {
@@ -206,7 +225,7 @@ active_sessions_unregister(uint16_t tcp_port, ser2net_client_handle_t client)
         }
     }
 
-    xSemaphoreGive(runtime_state.active_lock);
+    ser2net_os_mutex_unlock(runtime_state.active_lock);
 }
 
 struct session_init_param {
@@ -231,7 +250,7 @@ static void session_task(void *param)
     struct session_job job;
 
     for (;;) {
-        if (xQueueReceive(state->job_queue, &job, portMAX_DELAY) != pdPASS)
+        if (ser2net_os_queue_receive(state->job_queue, &job, SER2NET_OS_WAIT_FOREVER) != pdPASS)
             continue;
 
         ser2net_serial_handle_t serial = NULL;
@@ -308,17 +327,17 @@ static void listener_task(void *param)
             job.network = entry->net;
             job.tcp_port = entry->tcp_port;
 
-            if (xQueueSend(state->job_queue, &job, 0) != pdPASS) {
+            if (ser2net_os_queue_send(state->job_queue, &job, 0) != pdPASS) {
                 entry->net->close_client(entry->net->ctx, job.client);
-                vTaskDelay(pdMS_TO_TICKS(10));
+                ser2net_os_task_delay_ticks(SER2NET_OS_MS_TO_TICKS(10));
             }
         }
 
         if (!accepted_any) {
-            TickType_t delay = cfg->accept_poll_ticks;
-            if (delay == 0 || delay == portMAX_DELAY)
-                delay = pdMS_TO_TICKS(50);
-            vTaskDelay(delay);
+            ser2net_tick_t delay = cfg->accept_poll_ticks;
+            if (delay == 0 || delay == SER2NET_OS_WAIT_FOREVER)
+                delay = SER2NET_OS_MS_TO_TICKS(50);
+            ser2net_os_task_delay_ticks(delay);
         }
     }
 }
@@ -359,16 +378,16 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     runtime_state.cfg.control_ctx.add_port_cb = NULL;
 #endif
 
-    ESP_LOGI("ser2net_runtime", "Starting runtime with %zu listener(s)",
+    SER2NET_LOGI("ser2net_runtime", "Starting runtime with %zu listener(s)",
              (size_t)cfg->listener_count);
 
-    runtime_state.sessions = pvPortMalloc(session_slots * sizeof(struct active_session_entry));
+    runtime_state.sessions = ser2net_os_malloc(session_slots * sizeof(struct active_session_entry));
     if (!runtime_state.sessions)
         return pdFAIL;
     runtime_state.session_capacity = session_slots;
-    runtime_state.active_lock = xSemaphoreCreateMutex();
+    runtime_state.active_lock = ser2net_os_mutex_create();
     if (!runtime_state.active_lock) {
-        vPortFree(runtime_state.sessions);
+        ser2net_os_free(runtime_state.sessions);
         runtime_state.sessions = NULL;
         runtime_state.session_capacity = 0;
         return pdFAIL;
@@ -376,11 +395,11 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     active_sessions_clear();
 
 #if ENABLE_DYNAMIC_SESSIONS
-    runtime_state.port_lock = xSemaphoreCreateMutex();
+    runtime_state.port_lock = ser2net_os_mutex_create();
     if (!runtime_state.port_lock) {
-        vSemaphoreDelete(runtime_state.active_lock);
+        ser2net_os_mutex_delete(runtime_state.active_lock);
         runtime_state.active_lock = NULL;
-        vPortFree(runtime_state.sessions);
+        ser2net_os_free(runtime_state.sessions);
         runtime_state.sessions = NULL;
         runtime_state.session_capacity = 0;
         return pdFAIL;
@@ -412,7 +431,7 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
                 }
             }
         }
-        ESP_LOGI("ser2net_runtime", "Listener ready: tcp=%u -> serial port_id=%d (enabled=%d)",
+        SER2NET_LOGI("ser2net_runtime", "Listener ready: tcp=%u -> serial port_id=%d (enabled=%d)",
                  entry->tcp_port, entry->port_id, entry->enabled);
         runtime_state.listener_count++;
     }
@@ -430,29 +449,29 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     if (runtime_state.listener_count == 0) {
         runtime_state.cfg.control_enabled = false;
         runtime_state.control_started = false;
-        ESP_LOGI("ser2net_runtime", "Skipping control port (no listeners configured)");
+        SER2NET_LOGI("ser2net_runtime", "Skipping control port (no listeners configured)");
     } else if (runtime_state.cfg.control_enabled && runtime_state.cfg.control_ctx.tcp_port > 0) {
         if (ser2net_control_start(&runtime_state.cfg.control_ctx)) {
             runtime_state.control_started = true;
-            ESP_LOGI("ser2net_runtime", "Control port listening on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
+            SER2NET_LOGI("ser2net_runtime", "Control port listening on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
         } else {
-            ESP_LOGW("ser2net_runtime", "Failed to start control port on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
+            SER2NET_LOGW("ser2net_runtime", "Failed to start control port on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
         }
     } else {
         runtime_state.control_started = false;
     }
 
-    runtime_state.job_queue = xQueueCreate(session_slots, sizeof(struct session_job));
+    runtime_state.job_queue = ser2net_os_queue_create(session_slots, sizeof(struct session_job));
     if (!runtime_state.job_queue) {
-        vSemaphoreDelete(runtime_state.active_lock);
+        ser2net_os_mutex_delete(runtime_state.active_lock);
         runtime_state.active_lock = NULL;
-        vPortFree(runtime_state.sessions);
+        ser2net_os_free(runtime_state.sessions);
         runtime_state.sessions = NULL;
         runtime_state.session_capacity = 0;
         return pdFAIL;
     }
 
-    if (xTaskCreate(listener_task,
+    if (ser2net_os_task_create(listener_task,
                     cfg->listener_task_name ? cfg->listener_task_name : "ser2net_listen",
                     cfg->listener_task_stack_words,
                     &runtime_state,
@@ -462,19 +481,17 @@ ser2net_runtime_start(const struct ser2net_runtime_config *cfg)
     }
 
     for (size_t i = 0; i < session_slots; ++i) {
-        TaskHandle_t task_handle = NULL;
-        if (xTaskCreate(session_task,
-                        cfg->session_task_name ? cfg->session_task_name : "ser2net_sess",
-                        cfg->session_task_stack_words,
-                        &runtime_state,
-                        cfg->session_task_priority,
-                        &task_handle) != pdPASS) {
+        ser2net_task_handle_t task_handle = NULL;
+        if (ser2net_os_task_create(session_task,
+                                   cfg->session_task_name ? cfg->session_task_name : "ser2net_sess",
+                                   cfg->session_task_stack_words,
+                                   &runtime_state,
+                                   cfg->session_task_priority,
+                                   &task_handle) != pdPASS) {
             return pdFAIL;
         }
     }
 
-    runtime_notify_config_changed();
-    runtime_notify_config_changed();
     runtime_notify_config_changed();
     return pdPASS;
 }
@@ -494,28 +511,28 @@ ser2net_runtime_stop(void)
     }
 
     if (runtime_state.listener_task) {
-        vTaskDelete(runtime_state.listener_task);
+        ser2net_os_task_delete(runtime_state.listener_task);
         runtime_state.listener_task = NULL;
     }
 
     if (runtime_state.job_queue) {
-        vQueueDelete(runtime_state.job_queue);
+        ser2net_os_queue_delete(runtime_state.job_queue);
         runtime_state.job_queue = NULL;
     }
 
     if (runtime_state.active_lock) {
-        vSemaphoreDelete(runtime_state.active_lock);
+        ser2net_os_mutex_delete(runtime_state.active_lock);
         runtime_state.active_lock = NULL;
     }
     if (runtime_state.sessions) {
-        vPortFree(runtime_state.sessions);
+        ser2net_os_free(runtime_state.sessions);
         runtime_state.sessions = NULL;
         runtime_state.session_capacity = 0;
     }
 
     if (runtime_state.port_lock) {
 #if ENABLE_DYNAMIC_SESSIONS
-        vSemaphoreDelete(runtime_state.port_lock);
+        ser2net_os_mutex_delete(runtime_state.port_lock);
 #endif
         runtime_state.port_lock = NULL;
     }
@@ -549,7 +566,7 @@ ser2net_runtime_list_sessions(struct ser2net_active_session *out, size_t max_ent
     if (!runtime_state.sessions)
         return 0;
 
-    if (runtime_state.active_lock && xSemaphoreTake(runtime_state.active_lock, portMAX_DELAY) != pdPASS)
+    if (runtime_state.active_lock && ser2net_os_mutex_lock(runtime_state.active_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return 0;
 
     for (size_t i = 0; i < runtime_state.session_capacity; ++i) {
@@ -563,7 +580,7 @@ ser2net_runtime_list_sessions(struct ser2net_active_session *out, size_t max_ent
     }
 
     if (runtime_state.active_lock)
-        xSemaphoreGive(runtime_state.active_lock);
+        ser2net_os_mutex_unlock(runtime_state.active_lock);
 
     return reported;
 }
@@ -583,7 +600,7 @@ ser2net_runtime_disconnect_tcp_port(uint16_t tcp_port)
     const struct ser2net_network_if *network = NULL;
     ser2net_client_handle_t client = NULL;
 
-    if (runtime_state.active_lock && xSemaphoreTake(runtime_state.active_lock, portMAX_DELAY) == pdPASS) {
+    if (runtime_state.active_lock && ser2net_os_mutex_lock(runtime_state.active_lock, SER2NET_OS_WAIT_FOREVER) == pdPASS) {
         for (size_t i = 0; i < runtime_state.session_capacity; ++i) {
             if (!runtime_state.sessions[i].in_use)
                 continue;
@@ -593,7 +610,7 @@ ser2net_runtime_disconnect_tcp_port(uint16_t tcp_port)
                 break;
             }
         }
-        xSemaphoreGive(runtime_state.active_lock);
+        ser2net_os_mutex_unlock(runtime_state.active_lock);
     }
 
     if (!network || !client || !network->client_shutdown)
@@ -709,7 +726,7 @@ ser2net_runtime_update_serial_config(uint16_t tcp_port,
         } matches[SER2NET_MAX_PORTS];
         size_t match_count = 0;
 
-        if (xSemaphoreTake(runtime_state.active_lock, portMAX_DELAY) == pdPASS) {
+        if (ser2net_os_mutex_lock(runtime_state.active_lock, SER2NET_OS_WAIT_FOREVER) == pdPASS) {
             for (size_t i = 0; i < runtime_state.session_capacity; ++i) {
                 if (!runtime_state.sessions[i].in_use)
                     continue;
@@ -721,7 +738,7 @@ ser2net_runtime_update_serial_config(uint16_t tcp_port,
                     match_count++;
                 }
             }
-            xSemaphoreGive(runtime_state.active_lock);
+            ser2net_os_mutex_unlock(runtime_state.active_lock);
         }
 
         for (size_t i = 0; i < match_count; ++i) {
@@ -814,13 +831,13 @@ ser2net_runtime_copy_ports(struct ser2net_esp32_serial_port_cfg *out, size_t max
         return 0;
 
     size_t copied = 0;
-    if (runtime_state.port_lock && xSemaphoreTake(runtime_state.port_lock, portMAX_DELAY) == pdPASS) {
+    if (runtime_state.port_lock && ser2net_os_mutex_lock(runtime_state.port_lock, SER2NET_OS_WAIT_FOREVER) == pdPASS) {
         size_t count = runtime_state.port_count;
         if (count > max_ports)
             count = max_ports;
         memcpy(out, runtime_state.port_table, count * sizeof(struct ser2net_esp32_serial_port_cfg));
         copied = count;
-        xSemaphoreGive(runtime_state.port_lock);
+        ser2net_os_mutex_unlock(runtime_state.port_lock);
     }
     return copied;
 }
@@ -841,7 +858,7 @@ ser2net_runtime_add_port(const struct ser2net_esp32_serial_port_cfg *cfg)
     if (!cfg || !runtime_state.port_lock)
         return pdFAIL;
 
-    if (xSemaphoreTake(runtime_state.port_lock, portMAX_DELAY) != pdPASS)
+    if (ser2net_os_mutex_lock(runtime_state.port_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return pdFAIL;
 
     BaseType_t result = pdFAIL;
@@ -964,11 +981,11 @@ out:
         memset(&runtime_state.port_table[idx], 0,
                sizeof(runtime_state.port_table[idx]));
     } else {
-        ESP_LOGI("ser2net_runtime", "Dynamic port added: port_id=%d tcp=%u uart=%d",
+        SER2NET_LOGI("ser2net_runtime", "Dynamic port added: port_id=%d tcp=%u uart=%d",
                  stored->port_id, stored->tcp_port, stored->uart_num);
     }
 
-    xSemaphoreGive(runtime_state.port_lock);
+    ser2net_os_mutex_unlock(runtime_state.port_lock);
 
     if (result == pdPASS) {
         runtime_notify_config_changed();
@@ -978,9 +995,9 @@ out:
             runtime_state.cfg.control_ctx.tcp_port > 0) {
             if (ser2net_control_start(&runtime_state.cfg.control_ctx)) {
                 runtime_state.control_started = true;
-                ESP_LOGI("ser2net_runtime", "Control port listening on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
+                SER2NET_LOGI("ser2net_runtime", "Control port listening on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
             } else {
-                ESP_LOGW("ser2net_runtime", "Failed to start control port on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
+                SER2NET_LOGW("ser2net_runtime", "Failed to start control port on tcp=%u", runtime_state.cfg.control_ctx.tcp_port);
             }
         }
     }
@@ -1012,7 +1029,7 @@ ser2net_runtime_remove_port(uint16_t tcp_port)
     if (!runtime_state.port_lock)
         return pdFAIL;
 
-    if (xSemaphoreTake(runtime_state.port_lock, portMAX_DELAY) != pdPASS)
+    if (ser2net_os_mutex_lock(runtime_state.port_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return pdFAIL;
 
     BaseType_t result = pdFAIL;
@@ -1045,7 +1062,7 @@ ser2net_runtime_remove_port(uint16_t tcp_port)
 
     bool has_active = false;
     if (runtime_state.sessions && runtime_state.active_lock &&
-        xSemaphoreTake(runtime_state.active_lock, portMAX_DELAY) == pdPASS) {
+        ser2net_os_mutex_lock(runtime_state.active_lock, SER2NET_OS_WAIT_FOREVER) == pdPASS) {
         for (size_t i = 0; i < runtime_state.session_capacity; ++i) {
             if (!runtime_state.sessions[i].in_use)
                 continue;
@@ -1054,7 +1071,7 @@ ser2net_runtime_remove_port(uint16_t tcp_port)
                 break;
             }
         }
-        xSemaphoreGive(runtime_state.active_lock);
+        ser2net_os_mutex_unlock(runtime_state.active_lock);
     }
 
     if (has_active)
@@ -1105,7 +1122,7 @@ ser2net_runtime_remove_port(uint16_t tcp_port)
     result = pdPASS;
 
 out:
-    xSemaphoreGive(runtime_state.port_lock);
+    ser2net_os_mutex_unlock(runtime_state.port_lock);
 
     if (result == pdPASS)
         runtime_notify_config_changed();

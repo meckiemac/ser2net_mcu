@@ -31,8 +31,7 @@
 
 #include "ser2net_opts.h"
 #include "monitor_bus.h"
-
-#include "freertos/FreeRTOS.h"
+#include "ser2net_os.h"
 
 struct ser2net_esp32_serial_port_cfg;
 struct ser2net_serial_params;
@@ -60,15 +59,15 @@ struct ser2net_control_context {
     const char *version;
     bool (*disconnect_cb)(uint16_t tcp_port);
     size_t (*list_sessions_cb)(struct ser2net_active_session *out, size_t max_entries);
-    BaseType_t (*set_serial_config_cb)(uint16_t tcp_port,
-                                       const struct ser2net_serial_params *params,
-                                       uint32_t idle_timeout_ms,
-                                       bool apply_active,
-                                       const struct ser2net_pin_config *pins);
-    BaseType_t (*set_port_mode_cb)(uint16_t tcp_port,
-                                   enum ser2net_port_mode mode,
-                                   bool enable);
-    BaseType_t (*add_port_cb)(const struct ser2net_esp32_serial_port_cfg *cfg);
+    ser2net_os_status_t (*set_serial_config_cb)(uint16_t tcp_port,
+                                                const struct ser2net_serial_params *params,
+                                                uint32_t idle_timeout_ms,
+                                                bool apply_active,
+                                                const struct ser2net_pin_config *pins);
+    ser2net_os_status_t (*set_port_mode_cb)(uint16_t tcp_port,
+                                            enum ser2net_port_mode mode,
+                                            bool enable);
+    ser2net_os_status_t (*add_port_cb)(const struct ser2net_esp32_serial_port_cfg *cfg);
 };
 
 /** @brief Start the control port task. */

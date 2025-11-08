@@ -19,14 +19,11 @@
  */
 
 #include "monitor_bus.h"
+#include "ser2net_os.h"
 
 #if ENABLE_MONITORING
 
 #include <string.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/portmacro.h"
 
 #ifndef SER2NET_MONITOR_MAX_SINKS
 #define SER2NET_MONITOR_MAX_SINKS 4
@@ -38,7 +35,7 @@ struct monitor_sink_entry {
 };
 
 static struct monitor_sink_entry sink_table[SER2NET_MONITOR_MAX_SINKS];
-static portMUX_TYPE monitor_bus_mux = portMUX_INITIALIZER_UNLOCKED;
+static ser2net_spinlock_t monitor_bus_mux = SER2NET_SPINLOCK_INITIALIZER;
 
 /**
  * @brief Subscribe to monitor frames (see monitor_bus.h for API contract).
@@ -53,7 +50,7 @@ bool ser2net_monitor_register_sink(ser2net_monitor_sink_t sink, void *ctx)
         return false;
 
     bool inserted = false;
-    taskENTER_CRITICAL(&monitor_bus_mux);
+    ser2net_os_spinlock_enter(&monitor_bus_mux);
     for (size_t i = 0; i < SER2NET_MONITOR_MAX_SINKS; ++i) {
         if (sink_table[i].sink == sink && sink_table[i].ctx == ctx) {
             inserted = true;
@@ -65,7 +62,7 @@ bool ser2net_monitor_register_sink(ser2net_monitor_sink_t sink, void *ctx)
             inserted = true;
         }
     }
-    taskEXIT_CRITICAL(&monitor_bus_mux);
+    ser2net_os_spinlock_exit(&monitor_bus_mux);
     return inserted;
 }
 
@@ -77,7 +74,7 @@ void ser2net_monitor_unregister_sink(ser2net_monitor_sink_t sink, void *ctx)
     if (!sink)
         return;
 
-    taskENTER_CRITICAL(&monitor_bus_mux);
+    ser2net_os_spinlock_enter(&monitor_bus_mux);
     for (size_t i = 0; i < SER2NET_MONITOR_MAX_SINKS; ++i) {
         if (sink_table[i].sink == sink && sink_table[i].ctx == ctx) {
             sink_table[i].sink = NULL;
@@ -85,7 +82,7 @@ void ser2net_monitor_unregister_sink(ser2net_monitor_sink_t sink, void *ctx)
             break;
         }
     }
-    taskEXIT_CRITICAL(&monitor_bus_mux);
+    ser2net_os_spinlock_exit(&monitor_bus_mux);
 }
 
 /**
@@ -107,13 +104,13 @@ void ser2net_monitor_feed(uint16_t tcp_port,
     struct monitor_sink_entry snapshot[SER2NET_MONITOR_MAX_SINKS];
     size_t count = 0;
 
-    taskENTER_CRITICAL(&monitor_bus_mux);
+    ser2net_os_spinlock_enter(&monitor_bus_mux);
     for (size_t i = 0; i < SER2NET_MONITOR_MAX_SINKS; ++i) {
         if (sink_table[i].sink) {
             snapshot[count++] = sink_table[i];
         }
     }
-    taskEXIT_CRITICAL(&monitor_bus_mux);
+    ser2net_os_spinlock_exit(&monitor_bus_mux);
 
     for (size_t i = 0; i < count; ++i) {
         if (snapshot[i].sink)

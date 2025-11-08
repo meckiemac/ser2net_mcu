@@ -31,14 +31,14 @@
  */
 
 #include "session_ops.h"
+#include "ser2net_os.h"
 
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "esp_log.h"
-
-#include "freertos/semphr.h"
+#include "ser2net_log.h"
+#include "monitor_bus.h"
 
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
@@ -113,7 +113,7 @@ struct ser2net_session_ctx {
 
 static struct ser2net_basic_session_state g_session_state;
 static const char *SESSION_LOG_TAG = "ser2net_session";
-static SemaphoreHandle_t g_session_lock;
+static ser2net_mutex_t g_session_lock;
 
 /**
  * @brief Locate the metadata index for a given logical port id.
@@ -150,11 +150,11 @@ struct session_init_param {
 static BaseType_t
 net_write_all(const struct ser2net_network_if *net_if,
               ser2net_client_handle_t client,
-              const uint8_t *buf, size_t len, TickType_t timeout_ticks)
+              const uint8_t *buf, size_t len, ser2net_tick_t timeout_ticks)
 {
     /* Pump the TELNET frame to the TCP socket, honouring optional timeouts. */
     size_t written = 0;
-    TickType_t start = xTaskGetTickCount();
+    ser2net_tick_t start = ser2net_os_ticks_now();
 
     while (written < len) {
         int rv = net_if->client_send ? net_if->client_send(net_if->ctx, client,
@@ -166,13 +166,13 @@ net_write_all(const struct ser2net_network_if *net_if,
             return pdFAIL;
         }
         written += (size_t) rv;
-        if (timeout_ticks != portMAX_DELAY) {
-            TickType_t now = xTaskGetTickCount();
+        if (timeout_ticks != SER2NET_OS_WAIT_FOREVER) {
+            ser2net_tick_t now = ser2net_os_ticks_now();
             if ((now - start) >= timeout_ticks)
                 break;
         }
         if (rv == 0) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+            ser2net_os_task_delay_ticks(SER2NET_OS_MS_TO_TICKS(10));
         }
     }
     return (written == len) ? pdPASS : pdFAIL;
@@ -189,7 +189,7 @@ static BaseType_t
 send_telnet_cmd(struct ser2net_session_ctx *ctx, uint8_t cmd, uint8_t opt)
 {
     uint8_t buf[3] = { TN_IAC, cmd, opt };
-    return net_write_all(ctx->network_if, ctx->client, buf, sizeof(buf), pdMS_TO_TICKS(200));
+    return net_write_all(ctx->network_if, ctx->client, buf, sizeof(buf), SER2NET_OS_MS_TO_TICKS(200));
 }
 
 /**
@@ -206,20 +206,20 @@ send_telnet_subneg(struct ser2net_session_ctx *ctx,
     uint8_t header[3] = { TN_IAC, TN_SB, TN_OPT_COM_PORT };
     uint8_t trailer[2] = { TN_IAC, TN_SE };
 
-    if (net_write_all(ctx->network_if, ctx->client, header, sizeof(header), pdMS_TO_TICKS(200)) != pdPASS)
+    if (net_write_all(ctx->network_if, ctx->client, header, sizeof(header), SER2NET_OS_MS_TO_TICKS(200)) != pdPASS)
         return pdFAIL;
 
     for (size_t i = 0; i < len; ++i) {
         uint8_t byte = data[i];
         if (byte == TN_IAC) {
-            if (net_write_all(ctx->network_if, ctx->client, &byte, 1, pdMS_TO_TICKS(200)) != pdPASS)
+            if (net_write_all(ctx->network_if, ctx->client, &byte, 1, SER2NET_OS_MS_TO_TICKS(200)) != pdPASS)
                 return pdFAIL;
         }
-        if (net_write_all(ctx->network_if, ctx->client, &byte, 1, pdMS_TO_TICKS(200)) != pdPASS)
+        if (net_write_all(ctx->network_if, ctx->client, &byte, 1, SER2NET_OS_MS_TO_TICKS(200)) != pdPASS)
             return pdFAIL;
     }
 
-    return net_write_all(ctx->network_if, ctx->client, trailer, sizeof(trailer), pdMS_TO_TICKS(200));
+    return net_write_all(ctx->network_if, ctx->client, trailer, sizeof(trailer), SER2NET_OS_MS_TO_TICKS(200));
 }
 
 /**
@@ -258,7 +258,7 @@ apply_serial_settings(struct ser2net_session_ctx *ctx)
         return pdFAIL;
 
     /* Write pending UART settings back to the hardware driver. */
-    ESP_LOGI(SESSION_LOG_TAG,
+     SER2NET_LOGI(SESSION_LOG_TAG,
              "Applying serial settings: baud=%d data_bits=%d parity=%d stop_bits=%d flow=%d",
              ctx->current_baud,
              ctx->current_datasize,
@@ -276,9 +276,9 @@ apply_serial_settings(struct ser2net_session_ctx *ctx)
         ctx->current_flowcontrol);
 
     if (rv != pdPASS) {
-        ESP_LOGE(SESSION_LOG_TAG, "serial_configure() failed");
+        SER2NET_LOGE(SESSION_LOG_TAG, "serial_configure() failed");
     } else {
-        ESP_LOGI(SESSION_LOG_TAG, "Serial settings applied");
+         SER2NET_LOGI(SESSION_LOG_TAG, "Serial settings applied");
     }
 
     return rv;
@@ -306,7 +306,7 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
     uint8_t reply[8];
     BaseType_t rv;
 
-    ESP_LOGI(SESSION_LOG_TAG, "RFC2217 command %u payload_len=%zu", cmd, paylen);
+     SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217 command %u payload_len=%zu", cmd, paylen);
 
     switch (cmd) {
     case RFC2217_SIGNATURE:
@@ -324,11 +324,11 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
         if (paylen >= 4) {
             int baud = (payload[0] << 24) | (payload[1] << 16) |
                        (payload[2] << 8) | payload[3];
-            ESP_LOGI(SESSION_LOG_TAG, "RFC2217_SET_BAUD -> %d", baud);
+             SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217_SET_BAUD -> %d", baud);
             ctx->current_baud = baud;
             rv = apply_serial_settings(ctx);
             if (rv != pdPASS) {
-                ESP_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for baud=%d", baud);
+                SER2NET_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for baud=%d", baud);
                 return pdFAIL;
             }
             reply[0] = RFC2217_REPLY(RFC2217_SET_BAUD);
@@ -343,11 +343,11 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
     case RFC2217_SET_DATASIZE:
         if (paylen >= 1) {
             int datasize = payload[0];
-            ESP_LOGI(SESSION_LOG_TAG, "RFC2217_SET_DATASIZE -> %d", datasize);
+             SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217_SET_DATASIZE -> %d", datasize);
             ctx->current_datasize = datasize;
             rv = apply_serial_settings(ctx);
             if (rv != pdPASS) {
-                ESP_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for datasize=%d", datasize);
+                SER2NET_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for datasize=%d", datasize);
                 return pdFAIL;
             }
             reply[0] = RFC2217_REPLY(RFC2217_SET_DATASIZE);
@@ -365,14 +365,14 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
             case 2: parity_value = 1; break; /* odd */
             case 3: parity_value = 2; break; /* even */
             default:
-                ESP_LOGE(SESSION_LOG_TAG, "Unsupported parity code %u", rfc_parity);
+                SER2NET_LOGE(SESSION_LOG_TAG, "Unsupported parity code %u", rfc_parity);
                 return pdFAIL;
             }
-            ESP_LOGI(SESSION_LOG_TAG, "RFC2217_SET_PARITY -> code=%u (internal=%d)", rfc_parity, parity_value);
+             SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217_SET_PARITY -> code=%u (internal=%d)", rfc_parity, parity_value);
             ctx->current_parity = parity_value;
             rv = apply_serial_settings(ctx);
             if (rv != pdPASS) {
-                ESP_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for parity=%u", rfc_parity);
+                SER2NET_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for parity=%u", rfc_parity);
                 return pdFAIL;
             }
             reply[0] = RFC2217_REPLY(RFC2217_SET_PARITY);
@@ -390,14 +390,14 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
             case 2: stop_internal = 2; break;
             case 3: stop_internal = 15; break; /* 1.5 */
             default:
-                ESP_LOGE(SESSION_LOG_TAG, "Unsupported stopsize code %u", rfc_stop);
+                SER2NET_LOGE(SESSION_LOG_TAG, "Unsupported stopsize code %u", rfc_stop);
                 return pdFAIL;
             }
-            ESP_LOGI(SESSION_LOG_TAG, "RFC2217_SET_STOPSIZE -> code=%u (internal=%d)", rfc_stop, stop_internal);
+             SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217_SET_STOPSIZE -> code=%u (internal=%d)", rfc_stop, stop_internal);
             ctx->current_stopbits = stop_internal;
             rv = apply_serial_settings(ctx);
             if (rv != pdPASS) {
-                ESP_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for stopsize=%u", rfc_stop);
+                SER2NET_LOGE(SESSION_LOG_TAG, "apply_serial_settings failed for stopsize=%u", rfc_stop);
                 return pdFAIL;
             }
             reply[0] = RFC2217_REPLY(RFC2217_SET_STOPSIZE);
@@ -417,12 +417,12 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
     case RFC2217_SET_CONTROL:
         if (paylen >= 1) {
             uint8_t control = payload[0];
-            ESP_LOGI(SESSION_LOG_TAG, "RFC2217_SET_CONTROL -> 0x%02x", control);
+             SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217_SET_CONTROL -> 0x%02x", control);
             reply[0] = RFC2217_REPLY(RFC2217_SET_CONTROL);
             reply[1] = control;
             return send_telnet_subneg(ctx, reply, 2);
         } else {
-            ESP_LOGW(SESSION_LOG_TAG, "RFC2217_SET_CONTROL missing payload");
+            SER2NET_LOGW(SESSION_LOG_TAG, "RFC2217_SET_CONTROL missing payload");
             reply[0] = RFC2217_REPLY(RFC2217_SET_CONTROL);
             reply[1] = 0;
             return send_telnet_subneg(ctx, reply, 2);
@@ -434,7 +434,7 @@ handle_rfc2217_command(struct ser2net_session_ctx *ctx,
         return send_telnet_subneg(ctx, reply, 2);
 
     default:
-        ESP_LOGW(SESSION_LOG_TAG, "Unhandled RFC2217 command %u", cmd);
+        SER2NET_LOGW(SESSION_LOG_TAG, "Unhandled RFC2217 command %u", cmd);
         break;
     }
 
@@ -520,7 +520,7 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
                 default:
                     break;
                 }
-                ESP_LOGI(SESSION_LOG_TAG, "RFC2217 COM_PORT negotiation cmd=%u -> active=%d",
+                 SER2NET_LOGI(SESSION_LOG_TAG, "RFC2217 COM_PORT negotiation cmd=%u -> active=%d",
                          cmd, ctx->rfc2217_active);
             } else {
                 if (byte == TN_OPT_BINARY) {
@@ -540,7 +540,7 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
                     default:
                         break;
                     }
-                    ESP_LOGI(SESSION_LOG_TAG, "Telnet BINARY negotiation cmd=%u", cmd);
+                    SER2NET_LOGI(SESSION_LOG_TAG, "Telnet BINARY negotiation cmd=%u", cmd);
                 } else {
                     uint8_t resp = (cmd == TN_WILL || cmd == TN_WONT) ? TN_DONT : TN_WONT;
                     send_telnet_cmd(ctx, resp, byte);
@@ -552,7 +552,7 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
         if (ctx->in_subneg) {
             if (ctx->subopt_pos < sizeof(ctx->subopt_buf)) {
                 if (ctx->subopt_pos == 0) {
-                    ESP_LOGI(SESSION_LOG_TAG,
+                    SER2NET_LOGI(SESSION_LOG_TAG,
                              "Subnegotiation start: first byte=0x%02x",
                              byte);
                 }
@@ -565,33 +565,33 @@ process_network_data_telnet(struct ser2net_session_ctx *ctx,
                 if (ctx->subopt_pos >= 3) {
                     size_t data_len = ctx->subopt_pos - 2; /* drop trailing IAC SE */
                     const uint8_t *data = ctx->subopt_buf;
-                    ESP_LOGI(SESSION_LOG_TAG,
+                    SER2NET_LOGI(SESSION_LOG_TAG,
                              "Subnegotiation complete: len=%zu first_bytes=%02x %02x %02x",
                              ctx->subopt_pos,
                              ctx->subopt_buf[0],
                              ctx->subopt_pos > 1 ? ctx->subopt_buf[1] : 0,
                              ctx->subopt_pos > 2 ? ctx->subopt_buf[2] : 0);
-                    ESP_LOG_BUFFER_HEXDUMP(SESSION_LOG_TAG,
+                    SER2NET_LOG_BUFFER_HEXDUMP(SESSION_LOG_TAG,
                                            ctx->subopt_buf,
                                            ctx->subopt_pos,
-                                           ESP_LOG_INFO);
+                                           SER2NET_LOG_LEVEL_INFO);
                     if (data_len > 0) {
                         if (data[0] == TN_OPT_COM_PORT) {
                             data++;
                             data_len--;
                         } else {
-                            ESP_LOGW(SESSION_LOG_TAG,
+                            SER2NET_LOGW(SESSION_LOG_TAG,
                                      "Missing COM_PORT option prefix (first=0x%02x)",
                                      data[0]);
                         }
                         if (data_len > 0) {
                             if (handle_rfc2217_command(ctx, data, data_len) != pdPASS) {
-                                ESP_LOGW(SESSION_LOG_TAG, "RFC2217 command handling failed");
+                                SER2NET_LOGW(SESSION_LOG_TAG, "RFC2217 command handling failed");
                             }
                         }
                     }
                 } else {
-                    ESP_LOGW(SESSION_LOG_TAG, "Subnegotiation too short (%zu bytes)", ctx->subopt_pos);
+                    SER2NET_LOGW(SESSION_LOG_TAG, "Subnegotiation too short (%zu bytes)", ctx->subopt_pos);
                 }
                 ctx->subopt_pos = 0;
             }
@@ -667,7 +667,7 @@ flush_serial_to_net(struct ser2net_session_ctx *ctx)
 
     if (ctx->mode != SER2NET_PORT_MODE_TELNET) {
         return net_write_all(ctx->network_if, ctx->client,
-                             ctx->serial_buf, (size_t) rv, pdMS_TO_TICKS(50));
+                             ctx->serial_buf, (size_t) rv, SER2NET_OS_MS_TO_TICKS(50));
     }
 
     size_t out_len = 0;
@@ -679,7 +679,7 @@ flush_serial_to_net(struct ser2net_session_ctx *ctx)
     }
 
     return net_write_all(ctx->network_if, ctx->client,
-                         ctx->net_buf, out_len, pdMS_TO_TICKS(50));
+                         ctx->net_buf, out_len, SER2NET_OS_MS_TO_TICKS(50));
 }
 
 /**
@@ -700,7 +700,7 @@ basic_initialise(void *ctx, ser2net_client_handle_t client,
     if (!ctx_ptr || !param || !param->network)
         return pdFAIL;
 
-    sctx = pvPortMalloc(sizeof(*sctx));
+    sctx = ser2net_os_malloc(sizeof(*sctx));
     if (!sctx)
         return pdFAIL;
 
@@ -709,14 +709,14 @@ basic_initialise(void *ctx, ser2net_client_handle_t client,
     sctx->serial = serial;
     sctx->network_if = param ? param->network : NULL;
     sctx->port_id = param ? param->port_id : 0;
-    sctx->net_buf = pvPortMalloc(g_session_state.net_buf_size);
-    sctx->serial_buf = pvPortMalloc(g_session_state.serial_buf_size);
+    sctx->net_buf = ser2net_os_malloc(g_session_state.net_buf_size);
+    sctx->serial_buf = ser2net_os_malloc(g_session_state.serial_buf_size);
     if (!sctx->net_buf || !sctx->serial_buf) {
         if (sctx->net_buf)
-            vPortFree(sctx->net_buf);
+            ser2net_os_free(sctx->net_buf);
         if (sctx->serial_buf)
-            vPortFree(sctx->serial_buf);
-        vPortFree(sctx);
+            ser2net_os_free(sctx->serial_buf);
+        ser2net_os_free(sctx);
         return pdFAIL;
     }
 
@@ -757,7 +757,7 @@ basic_initialise(void *ctx, ser2net_client_handle_t client,
  */
 static BaseType_t
 basic_process_io(void *ctx, ser2net_client_handle_t client,
-                 ser2net_serial_handle_t serial, TickType_t block_ticks)
+                 ser2net_serial_handle_t serial, ser2net_tick_t block_ticks)
 {
     /* Poll TCP and UART sides in turn until the session requests teardown. */
     (void) client;
@@ -780,8 +780,9 @@ basic_process_io(void *ctx, ser2net_client_handle_t client,
                 return pdFAIL;
         } else if (rv > 0) {
             if (sctx->mode == SER2NET_PORT_MODE_TELNET) {
-                ESP_LOGI(SESSION_LOG_TAG, "Net RX %d bytes", rv);
-                ESP_LOG_BUFFER_HEXDUMP(SESSION_LOG_TAG, sctx->net_buf, (size_t) rv, ESP_LOG_INFO);
+                SER2NET_LOGI(SESSION_LOG_TAG, "Net RX %d bytes", rv);
+                SER2NET_LOG_BUFFER_HEXDUMP(SESSION_LOG_TAG, sctx->net_buf, (size_t) rv,
+                                           SER2NET_LOG_LEVEL_INFO);
                 if (process_network_data_telnet(sctx, sctx->net_buf, (size_t) rv) != pdPASS)
                     return pdFAIL;
             } else {
@@ -836,11 +837,11 @@ basic_handle_disconnect(void *ctx, ser2net_client_handle_t client,
         g_session_state.active_sessions[pidx]--;
 
     if (sctx->net_buf)
-        vPortFree(sctx->net_buf);
+        ser2net_os_free(sctx->net_buf);
     if (sctx->serial_buf)
-        vPortFree(sctx->serial_buf);
+        ser2net_os_free(sctx->serial_buf);
 
-    vPortFree(sctx);
+    ser2net_os_free(sctx);
     *ctx_ptr = NULL;
 }
 
@@ -870,7 +871,7 @@ ser2net_basic_session_ops_init(const struct ser2net_network_if *network,
     g_session_state.net_buf_size = cfg && cfg->net_buf_size ? cfg->net_buf_size : 256;
     g_session_state.serial_buf_size = cfg && cfg->serial_buf_size ? cfg->serial_buf_size : 256;
     if (!g_session_lock)
-        g_session_lock = xSemaphoreCreateMutex();
+        g_session_lock = ser2net_os_mutex_create();
 
     struct ser2net_serial_params fallback = {
         .baud = 115200,
@@ -953,19 +954,19 @@ ser2net_session_update_defaults(int port_id,
     if (!params)
         return pdFAIL;
 
-    if (!g_session_lock || xSemaphoreTake(g_session_lock, portMAX_DELAY) != pdPASS)
+    if (!g_session_lock || ser2net_os_mutex_lock(g_session_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return pdFAIL;
 
     int idx = find_port_index(port_id);
     if (idx < 0 || (size_t) idx >= g_session_state.port_count) {
-        xSemaphoreGive(g_session_lock);
+        ser2net_os_mutex_unlock(g_session_lock);
         return pdFAIL;
     }
 
     g_session_state.defaults[idx] = *params;
     g_session_state.idle_timeout_ms[idx] = idle_timeout_ms;
 
-    xSemaphoreGive(g_session_lock);
+    ser2net_os_mutex_unlock(g_session_lock);
     return pdPASS;
 }
 
@@ -1002,20 +1003,20 @@ BaseType_t
 ser2net_session_set_mode(int port_id, enum ser2net_port_mode mode)
 {
     if (!g_session_lock)
-        g_session_lock = xSemaphoreCreateMutex();
+        g_session_lock = ser2net_os_mutex_create();
 
-    if (!g_session_lock || xSemaphoreTake(g_session_lock, portMAX_DELAY) != pdPASS)
+    if (!g_session_lock || ser2net_os_mutex_lock(g_session_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return pdFAIL;
 
     int idx = find_port_index(port_id);
     if (idx < 0 || (size_t)idx >= g_session_state.port_count) {
-        xSemaphoreGive(g_session_lock);
+        ser2net_os_mutex_unlock(g_session_lock);
         return pdFAIL;
     }
 
     g_session_state.port_modes[idx] = mode;
 
-    xSemaphoreGive(g_session_lock);
+    ser2net_os_mutex_unlock(g_session_lock);
     return pdPASS;
 }
 
@@ -1039,20 +1040,20 @@ ser2net_session_register_port(int port_id,
         return pdFAIL;
 
     if (!g_session_lock)
-        g_session_lock = xSemaphoreCreateMutex();
+        g_session_lock = ser2net_os_mutex_create();
 
-    if (!g_session_lock || xSemaphoreTake(g_session_lock, portMAX_DELAY) != pdPASS)
+    if (!g_session_lock || ser2net_os_mutex_lock(g_session_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return pdFAIL;
 
     if (g_session_state.port_count >= SER2NET_MAX_PORTS) {
-        xSemaphoreGive(g_session_lock);
+        ser2net_os_mutex_unlock(g_session_lock);
         return pdFAIL;
     }
 
     for (size_t i = 0; i < g_session_state.port_count; ++i) {
         if (g_session_state.port_ids[i] == port_id ||
             g_session_state.tcp_ports[i] == tcp_port) {
-            xSemaphoreGive(g_session_lock);
+            ser2net_os_mutex_unlock(g_session_lock);
             return pdFAIL;
         }
     }
@@ -1066,7 +1067,7 @@ ser2net_session_register_port(int port_id,
     g_session_state.active_sessions[idx] = 0;
     g_session_state.port_count++;
 
-    xSemaphoreGive(g_session_lock);
+    ser2net_os_mutex_unlock(g_session_lock);
     return pdPASS;
 }
 
@@ -1079,19 +1080,19 @@ BaseType_t
 ser2net_session_unregister_port(int port_id)
 {
     if (!g_session_lock)
-        g_session_lock = xSemaphoreCreateMutex();
+        g_session_lock = ser2net_os_mutex_create();
 
-    if (!g_session_lock || xSemaphoreTake(g_session_lock, portMAX_DELAY) != pdPASS)
+    if (!g_session_lock || ser2net_os_mutex_lock(g_session_lock, SER2NET_OS_WAIT_FOREVER) != pdPASS)
         return pdFAIL;
 
     int idx = find_port_index(port_id);
     if (idx < 0) {
-        xSemaphoreGive(g_session_lock);
+        ser2net_os_mutex_unlock(g_session_lock);
         return pdFAIL;
     }
 
     if (g_session_state.active_sessions[idx] > 0) {
-        xSemaphoreGive(g_session_lock);
+        ser2net_os_mutex_unlock(g_session_lock);
         return pdFAIL;
     }
 
@@ -1117,6 +1118,6 @@ ser2net_session_unregister_port(int port_id)
 
     g_session_state.next_port_index = 0;
 
-    xSemaphoreGive(g_session_lock);
+    ser2net_os_mutex_unlock(g_session_lock);
     return pdPASS;
 }
