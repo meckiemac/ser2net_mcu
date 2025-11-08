@@ -16,7 +16,7 @@ flowchart LR
     SESSION -->|serial ops| UART(adapters.c serial_if)
     RUNTIME --> CTRL(control_port.c)
     SESSION --> MON(ser2net_monitor feed)
-    MON --> MQTT(MQTT bridge / other sinks)
+    MON --> Monitoring(monitor consumers / other sinks)
 ```
 
 1. `config.c` – exposes `ser2net_runtime_config_init()` and
@@ -36,7 +36,7 @@ flowchart LR
 6. `json_config.c` – cJSON backed loader that translates embedded JSON into the
    adapter/runtime structures.
 7. `security_store.c` – optional heap-backed vault that retains PEM material for
-   MQTT/HTTPS clients without bloating stack allocations.
+   TLS-enabled subsystems clients without bloating stack allocations.
 
 ### Port state machine
 
@@ -95,7 +95,7 @@ sequenceDiagram
 - Provides the default session handler used by the ESP32 example.
 - Converts runtime callbacks into RFC2217 operations, keeps per-port defaults,
   and exposes helpers for configuration changes (`ser2net_session_update_defaults()` etc.).
-- Publishes monitor frames for the control port, MQTT bridge, or tests.
+- Publishes monitor frames for the control port, monitor consumer, or tests.
 
 ### `adapters.c`
 
@@ -211,7 +211,7 @@ any ser2net headers.
 | `ENABLE_DYNAMIC_SESSIONS` | `1` | Allow ports/sessions to be added or removed at runtime (JSON, Web API, control port, C API).  Set to `0` for static builds; JSON support is automatically disabled. |
 | `ENABLE_CONTROL_PORT` | `1` | Compile the Telnet-style control port.  When disabled the symbols fall back to inline stubs. |
 | `ENABLE_MONITORING` | `1` | Enable the control-port/Web monitoring feed.  Automatically disabled when the control port is omitted. |
-| `ENABLE_SECURITY_STORE` | `1` | Allocate a heap-backed certificate vault used by MQTT/HTTPS clients. |
+| `ENABLE_SECURITY_STORE` | `1` | Allocate a heap-backed certificate vault used by TLS-enabled subsystems clients. |
 | `ENABLE_WEB_SERVER` | `1` | (ESP32 example) Compile the embedded HTTP server/UI.  Mostly useful when reusing the library outside of ESP-IDF. |
 | `ENABLE_JSON_CONFIG` | mirrors `ENABLE_DYNAMIC_SESSIONS` | Parse JSON configuration blobs.  Forced to `0` in static builds. |
 
@@ -324,7 +324,7 @@ add or remove listeners through `ser2net_runtime_add_port()` and
 `ser2net_runtime_remove_port()` or monitor activity using the control port or
 REST API provided by the ESP32 example.
 
-## Monitor bus & MQTT bridge
+## Monitor bus & monitor consumer
 
 Enabling `ENABLE_MONITORING` exposes a lightweight publish/subscribe bus:
 
@@ -338,7 +338,7 @@ void ser2net_monitor_feed(uint16_t tcp_port,
 ```
 
 The control port registers as a sink so operators can tail TELNET/TCP data.
-Other components, such as the MQTT bridge in `components/mqtt_client`, can
+Other components, such as the monitor consumer in `components/mqtt_client`, can
 subscribe at the same time to forward monitor chunks to external systems.  The
 ESP32 reference firmware publishes:
 
